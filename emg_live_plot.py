@@ -15,19 +15,32 @@ from collections import deque
 from datetime import datetime
 
 import serial
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+
+from ads1299 import code_to_volts
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Live EMG plot from USB CDC-ACM")
-    p.add_argument("--port", default="/dev/ttyACM0", help="Serial port")
-    p.add_argument("--baud", type=int, default=115200, help="Baud")
-    p.add_argument("--fs", type=float, default=250.0, help="Sample rate")
-    p.add_argument("--window", type=float, default=5.0, help="Rolling window length")
+    p.add_argument("--port", default="/dev/ttyACM0", help="Serial port (default: /dev/ttyACM0)")
+    p.add_argument("--baud", type=int, default=115200, help="Baud rate")
+    p.add_argument("--fs", type=float, default=250.0, help="Sample rate in Hz")
+    p.add_argument("--window", type=float, default=5.0, help="Rolling window length in seconds")
     p.add_argument("--channels", type=int, default=16, help="Number of EMG channels")
     p.add_argument("--outfile", default=None, help="CSV log path")
-    p.add_argument("--refresh-ms", type=int, default=50, help="Plot refresh interval")
+    p.add_argument("--refresh-ms", type=int, default=50, help="Plot refresh interval in ms")
+    
+    # ADS1299 scaling
+    p.add_argument("--gain", type=float, default=1.0, help="ADS1299 PGA gain")
+    p.add_argument("--vref", type=float, default=5, help="ADS1299 reference voltage in volts")
+    p.add_argument("--unit", choices=["v", "mv", "uv"], default="uv", help="Display unit")
+    
+    # Axis control
+    p.add_argument("--ylim", nargs=2, type=float, default=None, metavar=("YMIN", "YMAX"),
+                   help="Fixed y-axis limits in selected unit (auto if not specified)")
+    
     return p.parse_args()
 
 
@@ -89,6 +102,17 @@ class SerialReader(threading.Thread):
         self.stop_flag.set()
 
 
+def convert_units(data_codes, vref, gain, unit):
+    """Convert ADC codes to selected unit."""
+    volts = code_to_volts(data_codes, vref=vref, gain=gain)
+    if unit == "v":
+        return volts, "V"
+    elif unit == "mv":
+        return volts * 1e3, "mV"
+    else:  # uv
+        return volts * 1e6, "µV"
+
+
 def main():
     args = parse_args()
     maxlen = int(args.fs * args.window)
@@ -109,8 +133,10 @@ def main():
     reader = SerialReader(ser, args.channels, maxlen, csv_writer, lock)
     reader.start()
 
-    fig, axes = plt.subplots(args.channels, 1, sharex=True, figsize=(10, 16))
-    fig.suptitle(f"Live EMG -- {args.port} -- logging to {outfile}")
+    fig, axes = plt.subplots(args.channels, 1, sharex=True, figsize=(10, 12))
+    fig.suptitle(
+        f"Live EMG -- {args.port} -- gain={args.gain:g}, {args.unit} -- logging to {outfile}"
+    )
 
     lines = []
     range_labels = []
@@ -119,6 +145,10 @@ def main():
         ln, = ax.plot([], [], lw=0.8)
         ax.set_ylabel(f"ch{i+1}")
         ax.set_xlim(0, args.window)
+        
+        # Apply fixed y limits if specified
+        if args.ylim is not None:
+            ax.set_ylim(args.ylim[0], args.ylim[1])
 
         lbl = ax.text(
             0.005, 0.85, "",
@@ -146,10 +176,15 @@ def main():
     def update(frame):
         with lock:
             idx = list(reader.sample_idx)
-            data = [list(d) for d in reader.ch_data]
+            data_raw = [list(d) for d in reader.ch_data]
 
         if len(idx) < 2:
             return lines + range_labels + [status_text]
+
+        # Convert ADC codes to selected unit
+        data_array = np.asarray(data_raw, dtype=np.float64)
+        data_converted, unit_label = convert_units(data_array, vref=args.vref, gain=args.gain, unit=args.unit)
+        data = data_converted.tolist()
 
         t = [(i - idx[-1]) / args.fs + args.window for i in idx]
 
@@ -159,9 +194,13 @@ def main():
         for ax, ch, lbl in zip(axes, data, range_labels):
             if ch:
                 lo, hi = min(ch), max(ch)
-                pad = max((hi - lo) * 0.1, 1)
-                ax.set_ylim(lo - pad, hi + pad)
-                lbl.set_text(f"{lo:,}..{hi:,}")
+                
+                # Only auto-scale if ylim not fixed
+                if args.ylim is None:
+                    pad = max((hi - lo) * 0.1, 1)
+                    ax.set_ylim(lo - pad, hi + pad)
+                
+                lbl.set_text(f"{lo:.1f}..{hi:.1f} {unit_label}")
 
         bad_pct = 100.0 * reader.status_bad_count / max(reader.total_count, 1)
         status_text.set_text(
