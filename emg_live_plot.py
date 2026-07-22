@@ -72,7 +72,52 @@ def parse_sample_packet(data):
 
 
 # ============================================================================
-# Serial Reader
+# ADS1299 Binary Packet Decoding
+# ============================================================================
+SAMPLE_PACKET_FORMAT = '!BB I BB 48s B'
+SAMPLE_PACKET_SIZE = struct.calcsize(SAMPLE_PACKET_FORMAT)
+NUM_CHANNELS = 16
+
+
+def extract_24bit_signed(data, offset):
+    val = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2]
+    if val & 0x800000:
+        val -= 0x1000000
+    return val
+
+
+def find_sync_marker(data, start=0):
+    for i in range(start, len(data) - 1):
+        if data[i] == 0xAA and data[i + 1] == 0x55:
+            return i
+    return -1
+
+
+def parse_sample_packet(data):
+    if len(data) < SAMPLE_PACKET_SIZE:
+        return None
+    try:
+        sync0, sync1, sample_idx, status1_ok, status2_ok, ch_data_raw, checksum = \
+            struct.unpack(SAMPLE_PACKET_FORMAT, data[:SAMPLE_PACKET_SIZE])
+    except struct.error:
+        return None
+
+    if sync0 != 0xAA or sync1 != 0x55:
+        return None
+
+    # Extract channels
+    channels = [extract_24bit_signed(ch_data_raw, i * 3) for i in range(NUM_CHANNELS)]
+
+    return {
+        'sample_idx': sample_idx,
+        'status1_ok': bool(status1_ok),
+        'status2_ok': bool(status2_ok),
+        'channels': channels,
+    }
+
+
+# ============================================================================
+# Serial Reader - Improved
 # ============================================================================
 class SerialReader(threading.Thread):
     def __init__(self, ser, n_channels, maxlen, csv_writer, lock):
@@ -87,23 +132,28 @@ class SerialReader(threading.Thread):
         self.total_count = 0
         self.stop_flag = threading.Event()
         self.buffer = b''
+        self.error_count = 0
 
     def run(self):
+        print("Binary reader started...", file=sys.stderr)
         while not self.stop_flag.is_set():
             try:
-                chunk = self.ser.read(self.ser.in_waiting or 64)
+                chunk = self.ser.read(self.ser.in_waiting or 128)
             except serial.SerialException as e:
                 print(f"Serial error: {e}", file=sys.stderr)
                 break
+
             if not chunk:
                 continue
 
             self.buffer += chunk
 
+            processed = 0
             while len(self.buffer) >= SAMPLE_PACKET_SIZE:
                 sync_idx = find_sync_marker(self.buffer)
                 if sync_idx == -1:
                     break
+
                 if sync_idx > 0:
                     self.buffer = self.buffer[sync_idx:]
 
@@ -111,25 +161,31 @@ class SerialReader(threading.Thread):
                     break
 
                 packet = parse_sample_packet(self.buffer[:SAMPLE_PACKET_SIZE])
+
                 if packet:
                     self.total_count += 1
                     if not packet['status1_ok'] or not packet['status2_ok']:
                         self.status_bad_count += 1
 
                     with self.lock:
-                        self.sample_idx.append(self.total_count)          # Use simple counter for plotting
+                        self.sample_idx.append(self.total_count)
                         for i, code in enumerate(packet['channels']):
                             self.ch_data[i].append(code)
 
                     if self.csv_writer is not None:
                         self.csv_writer.writerow(
-                            [packet['sample_idx'], packet['status1_ok'], packet['status2_ok']] + 
+                            [packet['sample_idx'], int(packet['status1_ok']), int(packet['status2_ok'])] +
                             packet['channels']
                         )
 
                     self.buffer = self.buffer[SAMPLE_PACKET_SIZE:]
+                    processed += 1
                 else:
-                    self.buffer = self.buffer[1:]   # resync
+                    self.buffer = self.buffer[1:]  # try next byte
+                    self.error_count += 1
+
+            if processed == 0 and len(self.buffer) > SAMPLE_PACKET_SIZE * 4:
+                self.buffer = self.buffer[-SAMPLE_PACKET_SIZE*2:]  # prevent buffer bloat
 
     def stop(self):
         self.stop_flag.set()
@@ -149,7 +205,7 @@ def parse_args():
     p.add_argument("--refresh-ms", type=int, default=50, help="Plot refresh interval in ms")
 
     p.add_argument("--gain", type=float, default=8.0, help="ADS1299 PGA gain")
-    p.add_argument("--vref", type=float, default=4.5, help="ADS1299 reference voltage")
+    p.add_argument("--vref", type=float, default=5, help="ADS1299 reference voltage")
     p.add_argument("--unit", choices=["v", "mv", "uv"], default="uv", help="Display unit")
     p.add_argument("--ylim", nargs=2, type=float, default=None, metavar=("YMIN", "YMAX"),
                    help="Fixed y-axis limits")
@@ -158,14 +214,15 @@ def parse_args():
 
 
 def convert_units(data_codes, vref, gain, unit):
+    """Convert ADC codes to selected unit."""
     volts = code_to_volts(data_codes, vref=vref, gain=gain)
+    
     if unit == "v":
         return volts, "V"
     elif unit == "mv":
         return volts * 1e3, "mV"
-    else:
+    else:  # uv
         return volts * 1e6, "µV"
-
 
 def main():
     args = parse_args()
