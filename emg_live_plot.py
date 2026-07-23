@@ -5,18 +5,18 @@ Live EMG plotter - Binary ADS1299 USB CDC-ACM packets.
 
 import argparse
 import csv
+import os
+import struct
 import sys
 import threading
 import time
 from collections import deque
 from datetime import datetime
-import struct
 
-import serial
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import os
+import matplotlib.pyplot as plt
+import numpy as np
+import serial
 
 from ads1299 import code_to_volts
 
@@ -24,14 +24,14 @@ from ads1299 import code_to_volts
 os.makedirs("captures", exist_ok=True)
 
 # ============================================================================
-# ADS1299 Binary Packet Decoding (unchanged)
+# ADS1299 Binary Packet Decoding
 # ============================================================================
 ADS1299_NUM_BITS = 24
 ADS1299_MAX_CODE = 2 ** (ADS1299_NUM_BITS - 1)
-ADS1299_VREF = 4.5
+ADS1299_VREF = 5
 ADS1299_GAIN = 8
 
-SAMPLE_PACKET_FORMAT = '!BB I BB 48s B'
+SAMPLE_PACKET_FORMAT = '<BB I BB 48s B'
 SAMPLE_PACKET_SIZE = struct.calcsize(SAMPLE_PACKET_FORMAT)
 NUM_CHANNELS = 16
 
@@ -53,61 +53,25 @@ def find_sync_marker(data, start=0):
 def parse_sample_packet(data):
     if len(data) < SAMPLE_PACKET_SIZE:
         return None
+
+    packet_bytes = data[:SAMPLE_PACKET_SIZE]
     try:
         sync0, sync1, sample_idx, status1_ok, status2_ok, ch_data_raw, checksum = \
-            struct.unpack(SAMPLE_PACKET_FORMAT, data[:SAMPLE_PACKET_SIZE])
+            struct.unpack(SAMPLE_PACKET_FORMAT, packet_bytes)
     except struct.error:
         return None
 
     if sync0 != 0xAA or sync1 != 0x55:
         return None
 
+    # Reject false-positive sync matches: XOR all bytes except the checksum byte itself
+    computed = 0
+    for b in packet_bytes[:-1]:
+        computed ^= b
+    if computed != checksum:
+        return None
+
     channels = [extract_24bit_signed(ch_data_raw, i * 3) for i in range(NUM_CHANNELS)]
-    return {
-        'sample_idx': sample_idx,
-        'status1_ok': status1_ok,
-        'status2_ok': status2_ok,
-        'channels': channels,
-    }
-
-
-# ============================================================================
-# ADS1299 Binary Packet Decoding
-# ============================================================================
-SAMPLE_PACKET_FORMAT = '!BB I BB 48s B'
-SAMPLE_PACKET_SIZE = struct.calcsize(SAMPLE_PACKET_FORMAT)
-NUM_CHANNELS = 16
-
-
-def extract_24bit_signed(data, offset):
-    val = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2]
-    if val & 0x800000:
-        val -= 0x1000000
-    return val
-
-
-def find_sync_marker(data, start=0):
-    for i in range(start, len(data) - 1):
-        if data[i] == 0xAA and data[i + 1] == 0x55:
-            return i
-    return -1
-
-
-def parse_sample_packet(data):
-    if len(data) < SAMPLE_PACKET_SIZE:
-        return None
-    try:
-        sync0, sync1, sample_idx, status1_ok, status2_ok, ch_data_raw, checksum = \
-            struct.unpack(SAMPLE_PACKET_FORMAT, data[:SAMPLE_PACKET_SIZE])
-    except struct.error:
-        return None
-
-    if sync0 != 0xAA or sync1 != 0x55:
-        return None
-
-    # Extract channels
-    channels = [extract_24bit_signed(ch_data_raw, i * 3) for i in range(NUM_CHANNELS)]
-
     return {
         'sample_idx': sample_idx,
         'status1_ok': bool(status1_ok),
@@ -117,7 +81,7 @@ def parse_sample_packet(data):
 
 
 # ============================================================================
-# Serial Reader - Improved
+# Serial Reader
 # ============================================================================
 class SerialReader(threading.Thread):
     def __init__(self, ser, n_channels, maxlen, csv_writer, lock):
@@ -168,7 +132,7 @@ class SerialReader(threading.Thread):
                         self.status_bad_count += 1
 
                     with self.lock:
-                        self.sample_idx.append(self.total_count)
+                        self.sample_idx.append(packet['sample_idx'])
                         for i, code in enumerate(packet['channels']):
                             self.ch_data[i].append(code)
 
@@ -185,14 +149,14 @@ class SerialReader(threading.Thread):
                     self.error_count += 1
 
             if processed == 0 and len(self.buffer) > SAMPLE_PACKET_SIZE * 4:
-                self.buffer = self.buffer[-SAMPLE_PACKET_SIZE*2:]  # prevent buffer bloat
+                self.buffer = self.buffer[-SAMPLE_PACKET_SIZE * 2:]  # prevent buffer bloat
 
     def stop(self):
         self.stop_flag.set()
 
 
 # ============================================================================
-# Main + Plotting (Main fix here)
+# Main + Plotting
 # ============================================================================
 def parse_args():
     p = argparse.ArgumentParser(description="Live EMG plot from ADS1299 binary packets")
@@ -204,8 +168,8 @@ def parse_args():
     p.add_argument("--outfile", default=None, help="CSV log path")
     p.add_argument("--refresh-ms", type=int, default=50, help="Plot refresh interval in ms")
 
-    p.add_argument("--gain", type=float, default=8.0, help="ADS1299 PGA gain")
-    p.add_argument("--vref", type=float, default=5, help="ADS1299 reference voltage")
+    p.add_argument("--gain", type=float, default=ADS1299_GAIN, help="ADS1299 PGA gain")
+    p.add_argument("--vref", type=float, default=ADS1299_VREF, help="ADS1299 reference voltage")
     p.add_argument("--unit", choices=["v", "mv", "uv"], default="uv", help="Display unit")
     p.add_argument("--ylim", nargs=2, type=float, default=None, metavar=("YMIN", "YMAX"),
                    help="Fixed y-axis limits")
@@ -216,13 +180,14 @@ def parse_args():
 def convert_units(data_codes, vref, gain, unit):
     """Convert ADC codes to selected unit."""
     volts = code_to_volts(data_codes, vref=vref, gain=gain)
-    
+
     if unit == "v":
         return volts, "V"
     elif unit == "mv":
         return volts * 1e3, "mV"
     else:  # uv
         return volts * 1e6, "µV"
+
 
 def main():
     args = parse_args()
@@ -266,9 +231,13 @@ def main():
         if len(data_raw[0]) < 2:
             return lines + range_labels + [status_text]
 
-        # === FIXED TIME CALCULATION ===
         n = len(data_raw[0])
-        t = np.linspace(0, args.window, n)                     # Simple, stable rolling time axis
+        with lock:
+            sample_idx = list(reader.sample_idx)
+            data_raw = [list(d) for d in reader.ch_data]
+
+            n = len(data_raw[1])
+            t = (np.asarray(sample_idx[-n:], dtype=np.float64) - sample_idx[-n]) / args.fs
 
         data_array = np.asarray(data_raw, dtype=np.float64)
         data_converted, unit_label = convert_units(data_array, vref=args.vref, gain=args.gain, unit=args.unit)

@@ -21,7 +21,7 @@ ADS1299_NUM_BITS = 24
 ADS1299_MAX_CODE = 2 ** (ADS1299_NUM_BITS - 1)  # 2^23
 
 
-def code_to_volts(code, vref=4.5, gain=24):
+def code_to_volts(code, vref, gain):
     """
     Convert signed ADS1299 ADC code(s) to input-referred volts.
 
@@ -47,7 +47,7 @@ def code_to_volts(code, vref=4.5, gain=24):
     float or numpy array
         Input-referred voltage in volts.
     """
-    return np.asarray(code, dtype=float) * (vref / gain) / ADS1299_MAX_CODE
+    return np.asarray(code, dtype=np.float64) * (vref / gain) / ADS1299_MAX_CODE
 
 
 def code_to_microvolts(code, vref=4.5, gain=24):
