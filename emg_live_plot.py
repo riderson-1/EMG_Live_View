@@ -92,7 +92,8 @@ class SerialReader(threading.Thread):
         self.csv_writer = csv_writer
         self.sample_idx = deque(maxlen=maxlen)
         self.ch_data = [deque(maxlen=maxlen) for _ in range(n_channels)]
-        self.status_bad_count = 0
+        self.status1_bad_count = 0
+        self.status2_bad_count = 0
         self.total_count = 0
         self.stop_flag = threading.Event()
         self.buffer = b''
@@ -128,8 +129,10 @@ class SerialReader(threading.Thread):
 
                 if packet:
                     self.total_count += 1
-                    if not packet['status1_ok'] or not packet['status2_ok']:
-                        self.status_bad_count += 1
+                    if not packet['status1_ok']:
+                        self.status1_bad_count += 1
+                    if not packet['status2_ok']:
+                        self.status2_bad_count += 1
 
                     with self.lock:
                         self.sample_idx.append(packet['sample_idx'])
@@ -253,9 +256,10 @@ def main():
                     ax.set_ylim(lo - pad, hi + pad)
                 lbl.set_text(f"{lo:.1f}..{hi:.1f} {unit_label}")
 
-        bad_pct = 100.0 * reader.status_bad_count / max(reader.total_count, 1)
+        bad1_pct = 100.0 * reader.status1_bad_count / max(reader.total_count, 1)
+        bad2_pct = 100.0 * reader.status2_bad_count / max(reader.total_count, 1)
         status_text.set_text(
-            f"samples: {reader.total_count}  bad-status: {reader.status_bad_count} ({bad_pct:.1f}%)"
+            f"samples: {reader.total_count}  bad1-status: {reader.status1_bad_count} ({bad1_pct:.1f}%) bad2-status: {reader.status2_bad_count} ({bad2_pct:.1f}%)"
         )
         return lines + range_labels + [status_text]
 
