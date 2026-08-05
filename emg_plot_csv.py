@@ -207,9 +207,9 @@ def main():
     fig.suptitle(title)
 
     bad_count = np.count_nonzero(~good)
-    total_count = len(good)
-    bad_pct = 100.0 * bad_count / max(total_count, 1)
-    fig.text(0.01, 0.005, f"samples: {total_count}  bad-status: {bad_count} ({bad_pct:.1f}%)",
+    emg_total_count = len(good)
+    bad_pct = 100.0 * bad_count / max(emg_total_count, 1)
+    fig.text(0.01, 0.005, f"samples: {emg_total_count}  bad-status: {bad_count} ({bad_pct:.1f}%)",
              fontsize=9, family="monospace")
 
     plt.tight_layout(rect=[0, 0.02, 1, 0.96])
