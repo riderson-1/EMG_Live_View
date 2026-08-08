@@ -1,22 +1,37 @@
 # apply 20 - 400 Hz bandpass
 # apply 50 Hz bandstop
-# Source file captures/sokosti_capture_20260806_110557.csv
 
+import argparse
+import sys
 import numpy as np
 import pandas as pd
 from scipy import signal
 import matplotlib.pyplot as plt
 
-# ===== PARAMETERS =====
-# channels to plot (1-based). Examples:
-#   [12]        -> only channel 12
-#   [1, 5, 12]  -> channels 1, 5 and 12
-#   None        -> all 16 channels
-channels_to_plot = [12]
-# ======================
+# ===== COMMAND LINE ARGUMENTS =====
+parser = argparse.ArgumentParser(description="EMG signal processing with bandpass and bandstop filtering.")
+parser.add_argument("csv", nargs="?", help="Path to the CSV file (defaults to the most recent capture).")
+parser.add_argument("--channels", type=int, nargs="+", help="Channels to plot (1-based). Example: --channels 12 or --channels 1 5 12")
+parser.add_argument("--ylim_mag", type=float, nargs=2, help="Y-axis limits for all channels (min max). Example: --ylim -500 500")
+parser.add_argument("--ylim_fft", type=float, nargs=2, help="Y-axis limits for all channels (min max). Example: --ylim -500 500")
+args = parser.parse_args()
 
 # dataframe
-df = pd.read_csv("captures/sokosti_capture_20260806_110557.csv")
+csv_path = args.csv
+if csv_path is None:
+    import glob
+    import os
+    files = sorted(glob.glob(os.path.join("captures", "sokosti_capture_*.csv")))
+    if not files:
+        print("No CSV file given and none found in captures/.", file=sys.stderr)
+        sys.exit(1)
+    csv_path = files[-1]
+    print(f"Using most recent capture: {csv_path}")
+
+df = pd.read_csv(csv_path)
+
+# channels to plot (1-based)
+channels_to_plot = args.channels  # None means all channels
 
 # sampling frequency
 fs = 1000  # Hz
@@ -63,6 +78,9 @@ for row, i in enumerate(plot_indices):
     if row == n_channels - 1:
         plt.xlabel('Time (s)')
     plt.grid(True, alpha=0.3)
+    if args.ylim_mag:
+        plt.ylim(args.ylim_mag)
+plt.suptitle(f"Filtered EMG - {csv_path}", fontsize=12)
 plt.tight_layout()
 plt.show()
 
@@ -80,7 +98,7 @@ for row, i in enumerate(plot_indices):
     # frequency axis (positive frequencies only)
     freq = np.fft.fftfreq(len(emg_data[:, i]), 1/fs)
     pos_freqs = freq >= 0
-    plt.plot(freq[pos_freqs], np.abs(fft_orig[pos_freqs]), 'b-', alpha=0.5, label='Original', linewidth=0.5)
+    #plt.plot(freq[pos_freqs], np.abs(fft_orig[pos_freqs]), 'b-', alpha=0.5, label='Original', linewidth=0.5)
     plt.plot(freq[pos_freqs], np.abs(fft_filt[pos_freqs]), 'r-', label='Filtered', linewidth=0.8)
     plt.ylabel(f'Ch{i+1}')
     if row == 0:
@@ -89,5 +107,8 @@ for row, i in enumerate(plot_indices):
         plt.xlabel('Frequency (Hz)')
     plt.xlim([0, 500])
     plt.grid(True, alpha=0.3)
+    if args.ylim_fft:
+        plt.ylim(args.ylim_fft)
+plt.suptitle(f"FFT - {csv_path}", fontsize=12)
 plt.tight_layout()
 plt.show()
