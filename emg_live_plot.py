@@ -29,7 +29,7 @@ os.makedirs("captures", exist_ok=True)
 # ============================================================================
 ADS1299_NUM_BITS = 24
 ADS1299_MAX_CODE = 2 ** (ADS1299_NUM_BITS - 1)
-ADS1299_VREF = 5
+ADS1299_VREF = 4.5
 ADS1299_GAIN = 8
 
 EMG_SYNC_MARKER = b'\xAA\x55'
