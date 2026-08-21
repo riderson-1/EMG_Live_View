@@ -1,34 +1,46 @@
 #!/usr/bin/env python3
 """
-Live EMG plotter - USB CDC-ACM transport.
+Live EMG plotter - Bluetooth Low Energy (NUS) transport.
 
-Entry point that wires the shared sokosti pipeline together for a USB
-serial connection. The plotting behavior is identical to the original
-emg_live_plot.py; only the byte source differs from the BLE variant.
+Entry point that wires the shared sokosti pipeline together for a BLE
+connection to the Nordic UART Service. The plotting behavior is identical
+to the USB variant (emg_live_plot.py); only the byte source differs.
+
+BLE connection/throughput/stability telemetry is printed to the terminal
+(and optionally a log file), separate from the plot window.
 
 Usage:
-    python emg_live_plot.py --port /dev/ttyACM0 --gain 1 --mode both
+    python emg_live_ble.py --name Sokosti_BLE
+    python emg_live_ble.py --address AA:BB:CC:DD:EE:FF
 """
 
 import argparse
+import asyncio
 import csv
 import os
-import time
+import threading
 from datetime import datetime
 
-import serial
-
 from sokosti import FrameParser, PacketSink, LivePlotter
-from sokosti.sources import SerialSource
+from sokosti.sources import BleSource
 
 # Create captures folder if it doesn't exist
 os.makedirs("captures", exist_ok=True)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Live EMG plot from ADS1299 binary packets (USB)")
-    p.add_argument("--port", default="/dev/ttyACM0", help="Serial port")
-    p.add_argument("--baud", type=int, default=115200, help="Baud rate")
+    p = argparse.ArgumentParser(description="Live EMG plot from ADS1299 binary packets (BLE)")
+    p.add_argument("--name", default="Sokosti_BLE",
+                   help="BLE advertised name to scan for (default: Sokosti_BLE)")
+    p.add_argument("--address", default=None,
+                   help="Connect directly by MAC/UUID, skipping the scan on every (re)connect")
+    p.add_argument("--retry-delay", type=float, default=3.0,
+                   help="Seconds to wait before rescanning/reconnecting (default: 3)")
+    p.add_argument("--scan-timeout", type=float, default=10.0,
+                   help="Seconds to scan for the device (default: 10)")
+    p.add_argument("--log-file", default=None,
+                   help="Optional path to append BLE telemetry/connection events")
+
     p.add_argument("--fs", type=float, default=1000.0, help="EMG sample rate in Hz")
     p.add_argument("--imu-fs", type=float, default=200.0,
                    help="IMU sample rate in Hz (quaternion + acceleration combined)")
@@ -64,7 +76,7 @@ def main():
     show_imu = args.mode in ("both", "imu")
 
     outfile = args.outfile or os.path.join(
-        "captures", f"sokosti_capture_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        "captures", f"sokosti_ble_capture_{datetime.now():%Y%m%d_%H%M%S}.csv"
     )
     f = open(outfile, "w", newline="")
     csv_writer = csv.writer(f)
@@ -74,25 +86,24 @@ def main():
         + ["roll", "pitch", "yaw", "accel_x", "accel_y", "accel_z"]
     )
 
-    print(f"Opening {args.port} @ {args.baud} baud")
-    ser = serial.Serial(args.port, args.baud, timeout=0.01)
-    time.sleep(0.5)
-    # Discard bytes that accumulated before this run. This prevents an old
-    # host-side USB buffer from appearing as a several-second live delay.
-    ser.reset_input_buffer()
-
     parser = FrameParser()
     sink = PacketSink(
         args.channels, maxlen, csv_writer,
         process_emg=show_emg, process_imu=show_imu,
     )
-    source = SerialSource(ser, parser, sink)
-    source.start()
+    source = BleSource(
+        parser, sink,
+        name=args.name,
+        address=args.address,
+        retry_delay=args.retry_delay,
+        scan_timeout=args.scan_timeout,
+        log_file=args.log_file,
+    )
 
     plotter = LivePlotter(
         sink,
         mode=args.mode,
-        port_label=f"{args.port} @ {args.baud} baud",
+        port_label=f"BLE {args.name or args.address}",
         fs=args.fs,
         imu_fs=args.imu_fs,
         window=args.window,
@@ -108,12 +119,16 @@ def main():
         outfile=outfile,
     )
 
+    # Run the BLE event loop on a background thread so the matplotlib
+    # plot can run on the main thread (matplotlib must own the GUI loop).
+    ble_thread = threading.Thread(target=lambda: asyncio.run(source.run()), daemon=True)
+    ble_thread.start()
+
     try:
         plotter.show()
+    except KeyboardInterrupt:
+        print("\nStopped.")
     finally:
-        source.stop()
-        source.join(timeout=2)
-        ser.close()
         f.close()
         print(f"\nSaved {sink.emg_total_count} emg samples and "
               f"{sink.imu_total_count} imu samples to {outfile}")
