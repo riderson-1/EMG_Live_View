@@ -54,7 +54,7 @@ nyquist = fs / 2
 b_bandpass, a_bandpass = signal.butter(4, [20/nyquist, 400/nyquist], btype='bandpass')
 
 # design bandstop filter (50 Hz notch)
-b_stop, a_stop = signal.butter(2, [45/nyquist, 55/nyquist], btype='bandstop')
+b_stop, a_stop = signal.butter(2, [48/nyquist, 52/nyquist], btype='bandstop')
 
 # apply filters
 emg_filtered = np.zeros_like(emg_data)
