@@ -260,26 +260,29 @@ def main():
 
     else:
         # Subplots mode - EMG in the left column, IMU in the right column.
+        # Each sensor group gets its own subgrid sized to its own row count,
+        # so a 16-channel EMG capture and a 6-axis IMU do not force a shared
+        # 16-row grid that would leave empty frames on the right.
         n_emg_rows = n_channels if show_emg else 0
-        n_imu_rows = 6 if show_imu else 0
-        n_rows = max(n_emg_rows, n_imu_rows)
-        n_columns = int(show_emg) + int(show_imu)
 
-        fig_height = min(12, 2 + n_rows * 0.8)  # Cap at 12 inches
-        fig, axes = plt.subplots(n_rows, n_columns, sharex=True,
-                                 figsize=(12 + 4 * n_columns, fig_height))
+        fig_height = min(12, 2 + max(n_emg_rows, 6) * 0.8)  # Cap at 12 inches
+        fig = plt.figure(figsize=(8 + 4 * int(show_emg) + 4 * int(show_imu), fig_height))
 
-        if n_rows == 1:
-            axes = np.atleast_2d(axes)
-        if n_columns == 1:
-            axes = axes.reshape(n_rows, 1)
+        ratios = []
+        if show_emg:
+            ratios.append(2)
+        if show_imu:
+            ratios.append(1)
+        outer = fig.add_gridspec(1, len(ratios), width_ratios=ratios)
 
-        emg_col = 0 if show_emg else None
-        imu_col = int(show_emg) if show_imu else None
+        imu_col_offset = int(show_emg)
 
         if show_emg:
+            left = outer[0].subgridspec(n_emg_rows, 1, hspace=0.05)
+            last_ax = None
             for i in range(n_emg_rows):
-                ax = axes[i, emg_col]
+                ax = fig.add_subplot(left[i, 0])
+                last_ax = ax
                 name = selected_names[i]
                 y = data[i]
                 ax.plot(t, y, lw=0.8)
@@ -297,11 +300,14 @@ def main():
                 ax.text(0.005, 0.85, f"{lo:.1f}..{hi:.1f} {unit_label}",
                         transform=ax.transAxes, fontsize=8, family="monospace", va="top")
 
-            axes[n_emg_rows - 1, emg_col].set_xlabel("Time (s)")
+            last_ax.set_xlabel("Time (s)")
 
         if show_imu:
+            right = outer[imu_col_offset].subgridspec(6, 1, hspace=0.05)
+            last_ax = None
             for i in range(6):
-                ax = axes[i, imu_col]
+                ax = fig.add_subplot(right[i, 0])
+                last_ax = ax
                 y = imu_plot_data[i]
                 ax.plot(imu_t, y, lw=0.8, color="tab:orange")
                 ax.set_ylabel(IMU_LABELS[i])
@@ -316,11 +322,12 @@ def main():
                 ax.text(0.005, 0.85, f"{lo:.2f}..{hi:.2f} {unit}",
                         transform=ax.transAxes, fontsize=8, family="monospace", va="top")
 
-            axes[5, imu_col].set_xlabel("Time (s)")
+            last_ax.set_xlabel("Time (s)")
 
-    # Apply axis limits
+    # Apply axis limits to every axis (no shared-x grid now, so loop them)
     if args.xlim is not None:
-        fig.axes[0].set_xlim(args.xlim[0], args.xlim[1])
+        for ax in fig.axes:
+            ax.set_xlim(args.xlim[0], args.xlim[1])
 
     # Title and stats
     title = args.title or f"{args.csvfile} | gain={args.gain:g}, vref={args.vref:g}V"
