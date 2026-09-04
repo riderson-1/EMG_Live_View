@@ -118,66 +118,73 @@ ax_emg.set_xlabel('Time (s)')
 lines = [l_env] + acc_lines
 ax_emg.legend(lines, [l.get_label() for l in lines], loc='upper right', fontsize=8, ncol=2)
 plt.title(f"EMG RMS + IMU - {csv_path}")
+fig.tight_layout()
 
-# ===== INTERACTIVE GUI: scale/offset sliders =====
-# store raw IMU data
+# ===== INTERACTIVE GUI: per-signal scale/offset sliders in a separate control window =====
+# store raw IMU data (one entry per signal: accel_x/y/z, roll/pitch/yaw)
 acc_raw = [df[c].values.astype(float) for c in imu_channels[:3]]
 ang_raw = [df[c].values.astype(float) for c in imu_channels[3:]]
+all_raw = acc_raw + ang_raw
+all_labels = imu_labels
 
-state = {
-    'scale_acc': 1.0, 'offset_acc': 0.0,
-    'scale_ang': 1.0, 'offset_ang': 0.0,
-}
+# per-signal scale/offset
+scales = [1.0] * 6
+offsets = [0.0] * 6
 
 def update(_=None):
-    sa, oa = state['scale_acc'], state['offset_acc']
-    sg, og = state['scale_ang'], state['offset_ang']
-    for ln, raw in zip(acc_lines[:3], acc_raw):
-        ln.set_ydata(raw * sa + oa)
-    for ln, raw in zip(acc_lines[3:], ang_raw):
-        ln.set_ydata(raw * sg + og)
+    for ln, raw, s, o in zip(acc_lines, all_raw, scales, offsets):
+        ln.set_ydata(raw * s + o)
     fig.canvas.draw_idle()
 
-# FIXED axis limits so slider changes are actually visible.
-# Computed from the raw data range, expanded to cover the full slider
-# scale/offset ranges (scale up to 10x, offset up to +/- data span).
-def fixed_ylim(raw_list, max_scale, max_offset):
+# Axis limits stay FIXED to the raw data range (plus a small margin),
+# completely independent of the slider ranges below. When you scale or
+# offset a curve beyond the limits it simply clips at the top/bottom of
+# the plot, so increasing the scale visibly grows the IMU curves
+# relative to the EMG while the axes stay small.
+def data_range(raw_list, margin=0.1):
     allv = np.concatenate(raw_list)
     allv = allv[np.isfinite(allv)]
     lo, hi = allv.min(), allv.max()
-    cand = [lo * max_scale + max_offset, lo * max_scale - max_offset,
-            hi * max_scale + max_offset, hi * max_scale - max_offset,
-            lo, hi]
-    return min(cand), max(cand)
+    pad = (hi - lo) * margin or 1.0
+    return lo - pad, hi + pad
 
-acc_span = float(np.nanmax(np.abs(np.concatenate(acc_raw))))
-ang_span = float(np.nanmax(np.abs(np.concatenate(ang_raw))))
-ax_acc.set_ylim(*fixed_ylim(acc_raw, 10.0, acc_span))
-ax_ang.set_ylim(*fixed_ylim(ang_raw, 10.0, ang_span))
+ax_acc.set_ylim(*data_range(acc_raw))
+ax_ang.set_ylim(*data_range(ang_raw))
 
-# slider axes at the bottom of the figure
-plt.subplots_adjust(bottom=0.28)
+# Slider ranges (independent of the axis limits above; tune freely).
+# NOTE: a very large offset range makes the offset sliders coarse to drag;
+# lower acc_span/ang_span if you need finer offset control.
+acc_span = 10000
+ang_span = 10000
+
+# control window: 12 sliders (scale + offset for each of the 6 signals)
+fig_ctrl, ctrl_axes = plt.subplots(figsize=(6, 8))
+fig_ctrl.canvas.manager.set_window_title('IMU Scale/Offset Controls')
+ctrl_axes.axis('off')
+ctrl_axes.text(0.5, 0.98, 'IMU Scale / Offset (per signal)', ha='center', va='top', fontsize=11)
+
 def add_slider(y, label, vmin, vmax, vinit):
-    sax = plt.axes([0.15, y, 0.6, 0.02])
+    sax = fig_ctrl.add_axes([0.32, y, 0.55, 0.02])
     return Slider(sax, label, vmin, vmax, valinit=vinit)
 
-s_scale_acc = add_slider(0.19, 'acc scale', 0.1, 50.0, 1.0)
-s_offset_acc = add_slider(0.15, 'acc offset', -5000, 5000, 0.0)
-s_scale_ang = add_slider(0.11, 'ang scale', 0.1, 50.0, 1.0)
-s_offset_ang = add_slider(0.07, 'ang offset', -5000, 5000, 0.0)
+def make_pair(y, name, vmax_scale, vmax_offset, idx):
+    s_scale = add_slider(y, f'{name} scale', 0.1, vmax_scale, 1.0)
+    s_offset = add_slider(y - 0.04, f'{name} offset', -vmax_offset, vmax_offset, 0.0)
+    s_scale.on_changed(lambda v, i=idx: (scales.__setitem__(i, v), update()))
+    s_offset.on_changed(lambda v, i=idx: (offsets.__setitem__(i, v), update()))
+    slider_refs.append(s_scale)
+    slider_refs.append(s_offset)
 
-def on_scale_acc(v): state['scale_acc'] = v; update()
-def on_offset_acc(v): state['offset_acc'] = v; update()
-def on_scale_ang(v): state['scale_ang'] = v; update()
-def on_offset_ang(v): state['offset_ang'] = v; update()
-
-s_scale_acc.on_changed(on_scale_acc)
-s_offset_acc.on_changed(on_offset_acc)
-s_scale_ang.on_changed(on_scale_ang)
-s_offset_ang.on_changed(on_offset_ang)
+# accel sliders (top block), angle sliders (bottom block)
+slider_refs = []
+top, row_h = 0.88, 0.11
+for i, label in enumerate(imu_labels[:3]):
+    make_pair(top - i * row_h, label, 100.0, acc_span, i)
+base = top - 3 * row_h - 0.06
+for j, label in enumerate(imu_labels[3:]):
+    make_pair(base - j * row_h, label, 100.0, ang_span, 3 + j)
 
 # initialize limits with default scaling
 update()
 
-plt.tight_layout()
 plt.show()
