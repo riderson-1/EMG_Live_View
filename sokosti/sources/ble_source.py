@@ -39,13 +39,25 @@ class BleSource:
         self.scan_timeout = scan_timeout
         self.log_file = log_file
 
-        # Telemetry counters (transport-specific, not in the shared sink).
+        # Session-cumulative counters (since connect start; used only for
+        # the final summary printed on disconnect, NOT for the live rate --
+        # a cumulative average hides real-time behavior and converges
+        # slowly, which makes short test runs look misleadingly bad/good).
         self.bytes_rx = 0
         self.packets_rx = 0
+        self.notifications_rx = 0
         self.checksum_failures = 0
         self.connect_count = 0
         self.disconnect_count = 0
         self.start_time = time.time()
+
+        # Windowed counters: reset every report interval, so the printed
+        # rate reflects the last ~5s only. This is the number to watch.
+        self._window_bytes = 0
+        self._window_packets = 0
+        self._window_notifications = 0
+        self._window_notif_min = None
+        self._window_notif_max = None
         self._last_telemetry = time.time()
 
     # ------------------------------------------------------------------
@@ -69,9 +81,22 @@ class BleSource:
     # ------------------------------------------------------------------
     def _on_notify(self, _handle, data: bytearray):
         """BLE notification callback: feed bytes into the shared parser."""
-        self.bytes_rx += len(data)
+        n = len(data)
+
+        # Raw radio-level stats: one entry per actual BLE notification,
+        # independent of how many samples the parser recovers from it.
+        # This is what tells you whether notifications are still small
+        # (fragmented) even after a larger ATT MTU is negotiated.
+        self.bytes_rx += n
+        self.notifications_rx += 1
+        self._window_bytes += n
+        self._window_notifications += 1
+        self._window_notif_min = n if self._window_notif_min is None else min(self._window_notif_min, n)
+        self._window_notif_max = n if self._window_notif_max is None else max(self._window_notif_max, n)
+
         for kind, packet in self.parser.feed(bytes(data)):
             self.packets_rx += 1
+            self._window_packets += 1
             if kind == "emg":
                 self.sink.add_emg(packet)
             else:
@@ -84,17 +109,74 @@ class BleSource:
             self._report_telemetry(now)
             self._last_telemetry = now
 
-    def _report_telemetry(self, now=None):
+    def _report_telemetry(self, now=None, final=False):
         now = now or time.time()
-        elapsed = now - self.start_time
-        if elapsed <= 0:
+
+        if final:
+            # Session summary: cumulative average since connect.
+            elapsed = now - self.start_time
+            if elapsed <= 0:
+                return
+            self._log(
+                f"BLE session summary: {self.bytes_rx / elapsed:.0f} B/s avg, "
+                f"{self.packets_rx / elapsed:.1f} samples/s avg, "
+                f"{self.notifications_rx} notifications total, "
+                f"checksum failures: {self.checksum_failures}, "
+                f"connects: {self.connect_count}, disconnects: {self.disconnect_count}"
+            )
             return
+
+        window_elapsed = now - self._last_telemetry
+        if window_elapsed <= 0:
+            window_elapsed = 1e-9
+
+        avg_notif_size = (
+            self._window_bytes / self._window_notifications
+            if self._window_notifications else 0.0
+        )
+        notif_min = self._window_notif_min if self._window_notif_min is not None else 0
+        notif_max = self._window_notif_max if self._window_notif_max is not None else 0
+
         self._log(
-            f"BLE: {self.bytes_rx / elapsed:.0f} B/s, "
-            f"{self.packets_rx / elapsed:.1f} pkts/s, "
+            f"BLE: {self._window_bytes / window_elapsed:.0f} B/s, "
+            f"{self._window_packets / window_elapsed:.1f} samples/s, "
+            f"{self._window_notifications / window_elapsed:.1f} notifications/s "
+            f"(size avg={avg_notif_size:.0f}B min={notif_min}B max={notif_max}B), "
             f"checksum failures: {self.checksum_failures}, "
             f"connects: {self.connect_count}, disconnects: {self.disconnect_count}"
         )
+
+        # Reset the window for the next interval.
+        self._window_bytes = 0
+        self._window_packets = 0
+        self._window_notifications = 0
+        self._window_notif_min = None
+        self._window_notif_max = None
+
+    # ------------------------------------------------------------------
+    async def _acquire_mtu(self, client):
+        """
+        Force the backend to report the real negotiated ATT MTU.
+
+        bleak's default-23 report on `client.mtu_size` does NOT mean the
+        Exchange MTU procedure failed -- it just means bleak never asked
+        the backend for the negotiated value. The accessor for this has
+        moved across bleak versions (client._acquire_mtu() in older
+        releases, client._backend._acquire_mtu() in newer ones), so this
+        tries both and falls back gracefully if neither exists.
+        """
+        for accessor in (
+            getattr(client, "_acquire_mtu", None),
+            getattr(getattr(client, "_backend", None), "_acquire_mtu", None),
+        ):
+            if accessor is None:
+                continue
+            try:
+                await accessor()
+                return True
+            except Exception:
+                continue
+        return False
 
     # ------------------------------------------------------------------
     async def _connect_and_stream(self, address, disconnected_event):
@@ -111,6 +193,11 @@ class BleSource:
             if nus is None:
                 self._log("NUS service not found on this device.")
                 return
+
+            if await self._acquire_mtu(client):
+                self._log(f"ATT MTU: {client.mtu_size}")
+            else:
+                self._log(f"Could not acquire real MTU, using default: {client.mtu_size}")
 
             await client.start_notify(NUS_TX_UUID, self._on_notify)
             self._log("Subscribed to NUS TX. Streaming (Ctrl+C to quit)...")
@@ -137,6 +224,6 @@ class BleSource:
             except Exception as exc:
                 self._log(f"Connection error: {exc}")
 
-            self._report_telemetry()
+            self._report_telemetry(final=True)
             self._log(f"Reconnecting in {self.retry_delay:.0f}s...")
             await asyncio.sleep(self.retry_delay)
