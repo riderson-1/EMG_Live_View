@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import asyncio
-import csv
 import os
 import threading
 from datetime import datetime
@@ -78,9 +77,7 @@ def main():
     outfile = args.outfile or os.path.join(
         "captures", f"sokosti_ble_capture_{datetime.now():%Y%m%d_%H%M%S}.csv"
     )
-    f = open(outfile, "w", newline="")
-    csv_writer = csv.writer(f)
-    csv_writer.writerow(
+    csv_header = (
         ["sample", "status1_ok", "status2_ok"]
         + [f"ch{i+1}" for i in range(args.channels)]
         + ["roll", "pitch", "yaw", "accel_x", "accel_y", "accel_z"]
@@ -88,7 +85,7 @@ def main():
 
     parser = FrameParser()
     sink = PacketSink(
-        args.channels, maxlen, csv_writer,
+        args.channels, maxlen, csv_header=csv_header,
         process_emg=show_emg, process_imu=show_imu,
     )
     source = BleSource(
@@ -129,9 +126,8 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        f.close()
-        print(f"\nSaved {sink.emg_total_count} emg samples and "
-              f"{sink.imu_total_count} imu samples to {outfile}")
+        print(f"\nReceived {sink.emg_total_count} emg samples and "
+              f"{sink.imu_total_count} imu samples")
 
 
 if __name__ == "__main__":

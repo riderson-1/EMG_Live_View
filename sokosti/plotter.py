@@ -8,6 +8,7 @@ data from a PacketSink.snapshot() instead of reaching into SerialReader
 internals, so the same plotter works for USB and BLE alike.
 """
 
+import os
 import time
 
 import matplotlib.animation as animation
@@ -15,6 +16,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ads1299 import code_to_volts
+
+
+def format_elapsed(seconds):
+    """Format elapsed seconds as H:MM:SS."""
+    seconds = int(seconds)
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
 def convert_units(data_codes, vref, gain, unit):
@@ -56,7 +63,13 @@ class LivePlotter:
         self.show_imu = mode in ("both", "imu")
         self.start_time = time.time()
 
+        # Recording state
+        self._recording = False
+        self._record_start = None
+        self._record_seq = 0
+
         self._build_figure()
+        self._build_record_button()
 
     # ------------------------------------------------------------------
     def _build_figure(self):
@@ -118,6 +131,42 @@ class LivePlotter:
             self.fig, self.update, interval=self.refresh_ms,
             blit=False, cache_frame_data=False,
         )
+
+    # ------------------------------------------------------------------
+    def _build_record_button(self):
+        """Add a Record/Stop toggle button and a recording status label."""
+        from matplotlib.widgets import Button
+
+        self.record_ax = self.fig.add_axes([0.85, 0.005, 0.06, 0.035])
+        self.record_button = Button(self.record_ax, "Record",
+                                    hovercolor="0.85")
+        self.record_button.label.set_color("darkred")
+        self.record_button.on_clicked(self._toggle_recording)
+
+        self.record_status = self.fig.text(
+            0.84, 0.022, "", fontsize=10, family="monospace",
+            color="darkred", ha="right",
+        )
+
+    def _toggle_recording(self, event):
+        if self._recording:
+            path = self.sink.stop_recording()
+            self._recording = False
+            self.record_button.label.set_text("Record")
+            self.record_button.label.set_color("darkred")
+            self.record_ax.set_facecolor("white")
+            print(f"\nRecording stopped: {path}")
+        else:
+            self._record_seq += 1
+            base = os.path.splitext(self.outfile)[0]
+            path = f"{base}_rec{self._record_seq:02d}.csv"
+            self.sink.start_recording(path)
+            self._recording = True
+            self._record_start = time.time()
+            self.record_button.label.set_text("Stop")
+            self.record_button.label.set_color("white")
+            self.record_ax.set_facecolor("darkred")
+            print(f"\nRecording started: {path}")
 
     # ------------------------------------------------------------------
     def _trace_data(self, indices, values, fs):
@@ -232,6 +281,14 @@ class LivePlotter:
             f"imu samples: {imu_total_count}"
         )
 
+        if self._recording:
+            elapsed = time.time() - self._record_start
+            self.record_status.set_text(
+                f"\u25cf REC {format_elapsed(elapsed)}"
+            )
+        else:
+            self.record_status.set_text("")
+
         if frame % 100 == 0:
             elapsed = time.time() - self.start_time
             if elapsed > 0:
@@ -244,5 +301,10 @@ class LivePlotter:
     # ------------------------------------------------------------------
     def show(self):
         """Block until the plot window is closed."""
-        plt.subplots_adjust(left=0.08, right=0.98, top=0.95, bottom=0.05)
-        plt.show()
+        try:
+            plt.subplots_adjust(left=0.08, right=0.98, top=0.95, bottom=0.05)
+            plt.show()
+        finally:
+            if self._recording:
+                path = self.sink.stop_recording()
+                print(f"\nRecording stopped on exit: {path}")

@@ -10,21 +10,36 @@ consistent.
 This is the code that used to live inside SerialReader.
 """
 
+import csv
 import threading
 from collections import deque
 
 
 class PacketSink:
-    """Thread-safe accumulator for EMG/IMU packets, with optional CSV logging."""
+    """Thread-safe accumulator for EMG/IMU packets, with optional CSV logging.
 
-    def __init__(self, n_channels, maxlen, csv_writer=None,
+    CSV logging is off by default; call ``start_recording(path)`` to open a
+    file and begin writing rows, and ``stop_recording()`` to close it. The
+    header row (``csv_header``) is written once at the start of each recording.
+    """
+
+    def __init__(self, n_channels, maxlen, csv_header=None,
                  process_emg=True, process_imu=True):
         self.n_channels = n_channels
-        self.csv_writer = csv_writer
+        self.csv_header = csv_header
         self.process_emg = process_emg
         self.process_imu = process_imu
 
         self.lock = threading.Lock()
+
+        # Recording state (guarded by self.lock for the writer swap;
+        # the writer itself is only used from the transport thread).
+        self._recording = False
+        self._csv_file = None
+        self._csv_writer = None
+        self._csv_path = None
+        self.rec_emg_count = 0
+        self.rec_imu_count = 0
 
         self.sample_idx = deque(maxlen=maxlen)
         self.ch_data = [deque(maxlen=maxlen) for _ in range(n_channels)]
@@ -62,22 +77,23 @@ class PacketSink:
                 for i, code in enumerate(packet["channels"]):
                     self.ch_data[i].append(code)
 
-        if self.process_emg and self.csv_writer is not None:
-            # Always write IMU columns. EMG columns are written as zeros
-            # when the EMG stream is not active.
-            euler_values = [v if v is not None else "" for v in self.imu_latest_euler]
-            accel_values = [v if v is not None else "" for v in self.imu_latest_accel]
-            emg_channels = (
-                packet["channels"]
-                if self.process_emg else
-                [""] * self.n_channels
-            )
-            self.csv_writer.writerow(
-                [packet["sample_idx"], int(packet["status1_ok"]), int(packet["status2_ok"])]
-                + emg_channels
-                + euler_values
-                + accel_values
-            )
+                if self._recording:
+                    # Always write IMU columns. EMG columns are written as
+                    # zeros when the EMG stream is not active.
+                    euler_values = [v if v is not None else "" for v in self.imu_latest_euler]
+                    accel_values = [v if v is not None else "" for v in self.imu_latest_accel]
+                    emg_channels = (
+                        packet["channels"]
+                        if self.process_emg else
+                        [""] * self.n_channels
+                    )
+                    self._csv_writer.writerow(
+                        [packet["sample_idx"], int(packet["status1_ok"]), int(packet["status2_ok"])]
+                        + emg_channels
+                        + euler_values
+                        + accel_values
+                    )
+                    self.rec_emg_count += 1
 
     def add_imu(self, packet):
         """Record one parsed IMU packet and update the CSV when in IMU-only mode."""
@@ -99,17 +115,59 @@ class PacketSink:
                     self.imu_accel_data[i].append(value)
                     self.imu_latest_accel[i] = value
 
-        # Write to CSV in IMU-only mode (no EMG packets to trigger writes).
-        if self.csv_writer is not None and not self.process_emg:
-            euler_values = [v if v is not None else "" for v in self.imu_latest_euler]
-            accel_values = [v if v is not None else "" for v in self.imu_latest_accel]
-            emg_channels = [""] * self.n_channels
-            self.csv_writer.writerow(
-                [packet["sample_idx"], "", ""]
-                + emg_channels
-                + euler_values
-                + accel_values
-            )
+            # Write to CSV in IMU-only mode (no EMG packets to trigger writes).
+            if self._recording and not self.process_emg:
+                euler_values = [v if v is not None else "" for v in self.imu_latest_euler]
+                accel_values = [v if v is not None else "" for v in self.imu_latest_accel]
+                emg_channels = [""] * self.n_channels
+                self._csv_writer.writerow(
+                    [packet["sample_idx"], "", ""]
+                    + emg_channels
+                    + euler_values
+                    + accel_values
+                )
+                self.rec_imu_count += 1
+
+    # ------------------------------------------------------------------
+    # Recording control (called from the GUI thread)
+    # ------------------------------------------------------------------
+    def start_recording(self, path):
+        """Open ``path`` for CSV logging and write the header row."""
+        with self.lock:
+            if self._recording:
+                return self._csv_path
+            self._csv_file = open(path, "w", newline="")
+            self._csv_writer = csv.writer(self._csv_file)
+            if self.csv_header is not None:
+                self._csv_writer.writerow(self.csv_header)
+            self._csv_path = path
+            self._recording = True
+            self.rec_emg_count = 0
+            self.rec_imu_count = 0
+        return path
+
+    def stop_recording(self):
+        """Stop CSV logging and close the file. Returns the recorded path."""
+        with self.lock:
+            if not self._recording:
+                return None
+            self._recording = False
+            path = self._csv_path
+            try:
+                self._csv_file.flush()
+            finally:
+                self._csv_file.close()
+            self._csv_file = None
+            self._csv_writer = None
+        return path
+
+    @property
+    def recording(self):
+        return self._recording
+
+    @property
+    def csv_path(self):
+        return self._csv_path
 
     # ------------------------------------------------------------------
     # Consumption (called from the GUI thread)
