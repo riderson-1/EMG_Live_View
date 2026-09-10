@@ -15,6 +15,12 @@ parser.add_argument("--channels", type=int, nargs="+", help="Channels to plot (1
 parser.add_argument("--ylim_mag", type=float, nargs=2, help="Y-axis limits for all channels (min max). Example: --ylim -500 500")
 parser.add_argument("--ylim_fft", type=float, nargs=2, help="Y-axis limits for all channels (min max). Example: --ylim -500 500")
 parser.add_argument("--min_seg_fft", type=int, default=512, help="Minimum contiguous segment length (samples) used in Welch FFT (default 512).")
+parser.add_argument("--psd", choices=["fft", "welch"], default="fft",
+                    help="PSD method: 'welch' (default, handles gaps) or 'fft' (classic FFT magnitude).")
+parser.add_argument("--filters", nargs="*", choices=["notch", "bandpass"],
+                    default=["notch", "bandpass"],
+                    help="Filters to apply: 'bandpass' (20-400 Hz) and/or 'notch' (50 Hz). "
+                         "Default: both. Use --filters to apply none.")
 args = parser.parse_args()
 
 # dataframe
@@ -114,12 +120,17 @@ segments = valid_segments(received_mask, min_len=1)
 long_segments = valid_segments(received_mask, min_len=64)
 
 # ===== FILTERING: per contiguous valid segment only =====
+apply_bandpass = "bandpass" in args.filters
+apply_notch = "notch" in args.filters
 emg_filtered = np.full_like(recon, np.nan)
 for (s, e) in long_segments:
     for i in range(recon.shape[1]):
         seg = recon[s:e, i]
-        filtered = signal.filtfilt(b_bandpass, a_bandpass, seg)
-        filtered = signal.filtfilt(b_stop, a_stop, filtered)
+        filtered = seg
+        if apply_bandpass:
+            filtered = signal.filtfilt(b_bandpass, a_bandpass, filtered)
+        if apply_notch:
+            filtered = signal.filtfilt(b_stop, a_stop, filtered)
         emg_filtered[s:e, i] = filtered
 
 # plot after filters (selected channels)
@@ -162,18 +173,45 @@ def welch_segment_average(x, fs, min_seg):
     pxx_avg = np.average(np.stack(psds), axis=0, weights=weights)
     return f_ref, pxx_avg, len(psds)
 
+
+def fft_segment_average(x, fs, min_seg, nfft=1024):
+    """Average FFT magnitude over contiguous non-NaN segments of length >= min_seg."""
+    valid = ~np.isnan(x)
+    f = np.fft.rfftfreq(nfft, 1 / fs)
+    mags = []
+    weights = []
+    for (s, e) in valid_segments(valid, min_len=max(min_seg, nfft)):
+        seg = signal.detrend(x[s:e])
+        fft_mag = np.abs(np.fft.rfft(seg, n=nfft))
+        mags.append(fft_mag)
+        weights.append(e - s)
+    if not mags:
+        return None, None, 0
+    # length-weighted average
+    mag_avg = np.average(np.stack(mags), axis=0, weights=weights)
+    return f, mag_avg, len(mags)
+
 # FFT of selected channels (gaps handled by segmenting)
 plt.figure(figsize=(15, 2.5 * n_channels))
 for row, i in enumerate(plot_indices):
     plt.subplot(n_channels, 1, row+1)
 
-    f, pxx, n_segs = welch_segment_average(emg_filtered[:, i], fs, args.min_seg_fft)
-    if pxx is not None:
-        plt.semilogy(f, pxx, 'r-', label='Welch (contiguous segments)', linewidth=0.8)
-        print(f"Ch{i+1}: FFT computed from {n_segs} segment(s) "
-              f"(>= {args.min_seg_fft} samples, total {len(emg_filtered) - int(np.isnan(emg_filtered[:, i]).sum())} valid samples)")
-    else:
-        print(f"Ch{i+1}: no segment >= {args.min_seg_fft} samples; FFT skipped.")
+    if args.psd == "welch":
+        f, pxx, n_segs = welch_segment_average(emg_filtered[:, i], fs, args.min_seg_fft)
+        if pxx is not None:
+            plt.semilogy(f, pxx, 'r-', label='Welch (contiguous segments)', linewidth=0.8)
+            print(f"Ch{i+1}: Welch computed from {n_segs} segment(s) "
+                  f"(>= {args.min_seg_fft} samples, total {len(emg_filtered) - int(np.isnan(emg_filtered[:, i]).sum())} valid samples)")
+        else:
+            print(f"Ch{i+1}: no segment >= {args.min_seg_fft} samples; Welch skipped.")
+    else:  # fft
+        f, mag, n_segs = fft_segment_average(emg_filtered[:, i], fs, args.min_seg_fft)
+        if mag is not None:
+            plt.plot(f, mag, 'r-', label='FFT (contiguous segments)', linewidth=0.8)
+            print(f"Ch{i+1}: FFT computed from {n_segs} segment(s) "
+                  f"(>= {args.min_seg_fft} samples, total {len(emg_filtered) - int(np.isnan(emg_filtered[:, i]).sum())} valid samples)")
+        else:
+            print(f"Ch{i+1}: no segment >= {args.min_seg_fft} samples; FFT skipped.")
     plt.ylabel(f'Ch{i+1}')
     if row == 0:
         plt.legend()
@@ -183,6 +221,6 @@ for row, i in enumerate(plot_indices):
     plt.grid(True, alpha=0.3)
     if args.ylim_fft:
         plt.ylim(args.ylim_fft)
-plt.suptitle(f"Welch PSD (contiguous segments only) - {csv_path}", fontsize=12)
+plt.suptitle(f"{'Welch PSD' if args.psd == 'welch' else 'FFT'} (contiguous segments only) - {csv_path}", fontsize=12)
 plt.tight_layout()
 plt.show()
