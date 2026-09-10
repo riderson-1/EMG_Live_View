@@ -17,7 +17,7 @@ from datetime import datetime
 
 import serial
 
-from sokosti import FrameParser, PacketSink, LivePlotter
+from sokosti import FrameParser, PacketSink, LivePlotter, NUM_CHANNELS
 from sokosti.sources import SerialSource
 
 # Create captures folder if it doesn't exist
@@ -67,7 +67,7 @@ def main():
     )
     csv_header = (
         ["sample", "status1_ok", "status2_ok"]
-        + [f"ch{i+1}" for i in range(args.channels)]
+        + [f"ch{i+1}" for i in range(NUM_CHANNELS)]
         + ["roll", "pitch", "yaw", "accel_x", "accel_y", "accel_z"]
     )
 
@@ -79,8 +79,10 @@ def main():
     ser.reset_input_buffer()
 
     parser = FrameParser()
+    # The protocol always decodes NUM_CHANNELS per packet, so the sink must
+    # store all of them. --channels only controls how many the plotter shows.
     sink = PacketSink(
-        args.channels, maxlen, csv_header=csv_header,
+        NUM_CHANNELS, maxlen, csv_header=csv_header,
         process_emg=show_emg, process_imu=show_imu,
     )
     source = SerialSource(ser, parser, sink)

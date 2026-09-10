@@ -37,8 +37,11 @@ channels_to_plot = args.channels  # None means all channels
 # sampling frequency
 fs = 1000  # Hz
 
-# get EMG channels (ch1-ch16)
-emg_channels = [f'ch{i}' for i in range(1, 17)]
+# get the EMG channels actually present in the file (ch1, ch2, ... in order)
+emg_channels = [c for c in df.columns if isinstance(c, str) and c.lower().startswith('ch')
+                and c.lower()[2:].isdigit()]
+# sort numerically so ch2 comes before ch10
+emg_channels.sort(key=lambda c: int(c[2:]))
 emg_data = df[emg_channels].values.astype(float)
 
 # ===== GAP DETECTION (based on the counter index column) =====
