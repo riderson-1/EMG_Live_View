@@ -142,12 +142,13 @@ plt.show()
 def welch_segment_average(x, fs, min_seg):
     """Average Welch PSD over contiguous non-NaN segments of length >= min_seg."""
     valid = ~np.isnan(x)
+    nperseg = 1024
     psds = []
     weights = []
     f_ref = None
-    for (s, e) in valid_segments(valid, min_len=min_seg):
+    for (s, e) in valid_segments(valid, min_len=max(min_seg, nperseg)):
         seg = signal.detrend(x[s:e])
-        f, pxx = signal.welch(seg, fs=fs, nperseg=min(1024, e - s))
+        f, pxx = signal.welch(seg, fs=fs, nperseg=nperseg, nfft=nperseg)
         if f_ref is None:
             f_ref = f
         psds.append(pxx)
