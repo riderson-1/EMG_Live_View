@@ -289,12 +289,6 @@ class LivePlotter:
         else:
             self.record_status.set_text("")
 
-        if frame % 100 == 0:
-            elapsed = time.time() - self.start_time
-            if elapsed > 0:
-                print(f"EMG rate: {emg_total_count / elapsed:.1f} Hz, "
-                      f"IMU rate: {imu_total_count / elapsed:.1f} Hz")
-
         return (self.emg_lines + self.emg_range_labels
                 + self.imu_lines + self.imu_range_labels + [self.status_text])
 

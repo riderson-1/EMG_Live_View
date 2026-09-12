@@ -22,6 +22,8 @@ from sokosti.sources import SerialSource
 
 # Create captures folder if it doesn't exist
 os.makedirs("captures", exist_ok=True)
+# Create logs folder if it doesn't exist
+os.makedirs("logs", exist_ok=True)
 
 
 def parse_args():
@@ -34,6 +36,9 @@ def parse_args():
     p.add_argument("--window", type=float, default=5.0, help="Rolling window length in seconds")
     p.add_argument("--channels", type=int, default=16, help="Number of EMG channels")
     p.add_argument("--outfile", default=None, help="CSV log path")
+    p.add_argument("--log-file", default=None,
+                   help="Optional path to append run telemetry/events "
+                        "(default: logs/sokosti_usb_run_<timestamp>.log)")
     p.add_argument("--refresh-ms", type=int, default=100, help="Plot refresh interval in ms")
     p.add_argument("--max-plot-points", type=int, default=1200,
                    help="Maximum points per trace to draw per refresh")
@@ -65,6 +70,9 @@ def main():
     outfile = args.outfile or os.path.join(
         "captures", f"sokosti_capture_{datetime.now():%Y%m%d_%H%M%S}.csv"
     )
+    log_file = args.log_file or os.path.join(
+        "logs", f"sokosti_usb_run_{datetime.now():%Y%m%d_%H%M%S}.log"
+    )
     csv_header = (
         ["sample", "status1_ok", "status2_ok"]
         + [f"ch{i+1}" for i in range(NUM_CHANNELS)]
@@ -85,7 +93,7 @@ def main():
         NUM_CHANNELS, maxlen, csv_header=csv_header,
         process_emg=show_emg, process_imu=show_imu,
     )
-    source = SerialSource(ser, parser, sink)
+    source = SerialSource(ser, parser, sink, log_file=log_file)
     source.start()
 
     plotter = LivePlotter(
@@ -112,6 +120,7 @@ def main():
     finally:
         source.stop()
         source.join(timeout=2)
+        source.close()
         ser.close()
         print(f"\nReceived {sink.emg_total_count} emg samples and "
               f"{sink.imu_total_count} imu samples")

@@ -30,6 +30,7 @@ from .protocol import (
 from .frames import FrameParser
 from .sink import PacketSink
 from .plotter import LivePlotter
+from .logging import RunLogger
 
 __all__ = [
     "EMG_SYNC_MARKER",
@@ -46,4 +47,5 @@ __all__ = [
     "FrameParser",
     "PacketSink",
     "LivePlotter",
+    "RunLogger",
 ]

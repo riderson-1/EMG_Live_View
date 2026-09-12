@@ -25,6 +25,8 @@ from sokosti.sources import BleSource
 
 # Create captures folder if it doesn't exist
 os.makedirs("captures", exist_ok=True)
+# Create logs folder if it doesn't exist
+os.makedirs("logs", exist_ok=True)
 
 
 def parse_args():
@@ -38,7 +40,8 @@ def parse_args():
     p.add_argument("--scan-timeout", type=float, default=10.0,
                    help="Seconds to scan for the device (default: 10)")
     p.add_argument("--log-file", default=None,
-                   help="Optional path to append BLE telemetry/connection events")
+                   help="Optional path to append BLE telemetry/connection events "
+                        "(default: logs/sokosti_ble_run_<timestamp>.log)")
 
     p.add_argument("--fs", type=float, default=1000.0, help="EMG sample rate in Hz")
     p.add_argument("--imu-fs", type=float, default=200.0,
@@ -77,6 +80,9 @@ def main():
     outfile = args.outfile or os.path.join(
         "captures", f"sokosti_ble_capture_{datetime.now():%Y%m%d_%H%M%S}.csv"
     )
+    log_file = args.log_file or os.path.join(
+        "logs", f"sokosti_ble_run_{datetime.now():%Y%m%d_%H%M%S}.log"
+    )
     csv_header = (
         ["sample", "status1_ok", "status2_ok"]
         + [f"ch{i+1}" for i in range(NUM_CHANNELS)]
@@ -96,7 +102,7 @@ def main():
         address=args.address,
         retry_delay=args.retry_delay,
         scan_timeout=args.scan_timeout,
-        log_file=args.log_file,
+        log_file=log_file,
     )
 
     plotter = LivePlotter(
@@ -128,6 +134,7 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        source.close()
         print(f"\nReceived {sink.emg_total_count} emg samples and "
               f"{sink.imu_total_count} imu samples")
 

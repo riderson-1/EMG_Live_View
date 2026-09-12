@@ -13,6 +13,8 @@ import time
 
 from bleak import BleakClient, BleakScanner
 
+from ..logging import RunLogger
+
 # Standard Nordic UART Service UUIDs
 NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # write:  PC -> nRF
@@ -38,6 +40,7 @@ class BleSource:
         self.retry_delay = retry_delay
         self.scan_timeout = scan_timeout
         self.log_file = log_file
+        self.logger = RunLogger(log_file) if log_file else None
 
         # Session-cumulative counters (since connect start; used only for
         # the final summary printed on disconnect, NOT for the live rate --
@@ -60,13 +63,25 @@ class BleSource:
         self._window_notif_max = None
         self._last_telemetry = time.time()
 
+        # Per-second EMG/IMU rate counters. These are reset every second so
+        # the reported rate is the actual samples received in that second,
+        # not a cumulative average over the whole run.
+        self._sec_emg = 0
+        self._sec_imu = 0
+        self._last_rate = time.time()
+
     # ------------------------------------------------------------------
     def _log(self, message):
-        line = f"[{time.strftime('%H:%M:%S')}] {message}"
-        print(line)
-        if self.log_file:
-            with open(self.log_file, "a") as f:
-                f.write(line + "\n")
+        if self.logger is not None:
+            self.logger.log(message)
+        else:
+            print(f"[{time.strftime('%H:%M:%S')}] {message}")
+
+    # ------------------------------------------------------------------
+    def close(self):
+        """Close the run log file, if one was opened."""
+        if self.logger is not None:
+            self.logger.close()
 
     # ------------------------------------------------------------------
     async def _find_device(self):
@@ -99,8 +114,10 @@ class BleSource:
             self._window_packets += 1
             if kind == "emg":
                 self.sink.add_emg(packet)
+                self._sec_emg += 1
             else:
                 self.sink.add_imu(packet)
+                self._sec_imu += 1
         self.checksum_failures = self.parser.error_count
 
         # Periodic throughput/stability report to the terminal.
@@ -108,6 +125,25 @@ class BleSource:
         if now - self._last_telemetry >= 5.0:
             self._report_telemetry(now)
             self._last_telemetry = now
+
+        # Per-second EMG/IMU rate report. Counts are reset every second so
+        # the reported rate is samples received in that second, not a
+        # cumulative average over the whole run.
+        if now - self._last_rate >= 1.0:
+            self._report_rate(now)
+            self._last_rate = now
+
+    def _report_rate(self, now=None):
+        now = now or time.time()
+        elapsed = now - self._last_rate
+        if elapsed <= 0:
+            elapsed = 1e-9
+        self._log(
+            f"EMG rate: {self._sec_emg / elapsed:.1f} Hz, "
+            f"IMU rate: {self._sec_imu / elapsed:.1f} Hz"
+        )
+        self._sec_emg = 0
+        self._sec_imu = 0
 
     def _report_telemetry(self, now=None, final=False):
         now = now or time.time()
@@ -209,6 +245,18 @@ class BleSource:
     # ------------------------------------------------------------------
     async def run(self):
         """Connect (with auto-reconnect) and stream until cancelled."""
+        if self.logger is not None:
+            self.logger.write_header(
+                "Sokosti BLE live capture",
+                metadata={
+                    "name": self.name,
+                    "address": self.address,
+                    "retry_delay": self.retry_delay,
+                    "scan_timeout": self.scan_timeout,
+                    "log_file": self.log_file,
+                },
+            )
+
         fixed_address = self.address
 
         while True:
