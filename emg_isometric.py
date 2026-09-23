@@ -40,6 +40,12 @@ parser.add_argument("--labels", type=str, default=None,
                     help='Comma-separated labels for manual contractions: "s" or "w" per contraction, '
                          'e.g. "s,s,w,w". Only used with --contractions.')
 parser.add_argument("--save", type=str, default=None, help="Save figures to PNG files with this prefix.")
+parser.add_argument("--gain", type=float, default=1.0,
+                    help="ADS1299 PGA gain used during recording, for converting ADC codes to "
+                         "microvolts (Vref = 4.5 V). Default 1.")
+parser.add_argument("--unit", type=str, default=None,
+                    help="Y-axis unit for the magnitude plot: 'uV', 'mV' or 'V'. "
+                         "Default: auto (uV if max < 1 mV, else mV).")
 args = parser.parse_args()
 
 # ===== LOAD CSV =====
@@ -55,6 +61,10 @@ if csv_path is None:
 df = pd.read_csv(csv_path)
 
 fs = 1000  # Hz
+
+# ADS1299 scaling: raw ADC codes -> volts (Vref = 4.5 V, 24-bit signed)
+VREF = 4.5
+VOLTS_PER_CODE = VREF / args.gain / (2 ** 23)
 
 # EMG channels present in the file (ch1, ch2, ... sorted numerically)
 emg_channels = [c for c in df.columns if isinstance(c, str) and c.lower().startswith("ch")
@@ -133,6 +143,7 @@ for row, i in enumerate(plot_indices):
         ax.set_xlabel("Time (s)")
 fig1.suptitle(f"Filtered EMG magnitude + linear envelope - {os.path.basename(csv_path)}", fontsize=12)
 fig1.tight_layout()
+plt.close(fig1)  # don't pop up a window; only fig2 is shown
 
 # ===== CONTRACTION DETECTION =====
 def parse_manual(spec):
@@ -216,34 +227,52 @@ print("=" * 60)
 NORM_PTS = 101  # 0..100 %
 
 
-def normalized_envelopes(env, contractions, global_max):
-    """Resample each contraction envelope to 0-100 % of its duration.
-    Amplitude is expressed as % of the GLOBAL envelope max so that strong
-    and weak contractions are directly comparable across subplots."""
+def normalized_envelopes(env, contractions):
+    """Resample each contraction envelope to -20..120 % of its duration
+    (20 % before/after context included). Amplitude in µV (raw envelope)."""
     curves = []
     for (a, b) in contractions:
-        i0, i1 = int(a * fs), int(b * fs)
+        pad = 0.2 * (b - a)
+        i0 = max(0, int((a - pad) * fs))
+        i1 = min(n_full, int((b + pad) * fs))
         seg = env[i0:i1]
         seg = seg[~np.isnan(seg)]
         if len(seg) < 10:
             continue
-        x_old = np.linspace(0, 100, len(seg))
-        x_new = np.linspace(0, 100, NORM_PTS)
+        x_old = np.linspace(-20, 120, len(seg))
+        x_new = np.linspace(-20, 120, NORM_PTS)
         curves.append(np.interp(x_new, x_old, seg))
     return np.array(curves)
 
 
-env_ch = envelopes[:, plot_indices[0]]
-global_max = np.nanmax(env_ch)
+# unit selection: explicit --unit wins, otherwise auto (uV if max < 1 mV, else mV)
+env_v = envelopes[:, plot_indices[0]] * VOLTS_PER_CODE
+max_v = np.nanmax(env_v)
+if args.unit:
+    u = args.unit.lower().strip()
+    unit_scale = {"uv": 1e6, "µv": 1e6, "mv": 1e3, "v": 1.0}[u]
+    unit = {"uv": "µV", "µv": "µV", "mv": "mV", "v": "V"}[u]
+else:
+    if max_v < 1e-3:
+        unit_scale, unit = 1e6, "µV"
+    else:
+        unit_scale, unit = 1e3, "mV"
+
+env_ch = env_v * unit_scale
+emg_filtered_uv = emg_filtered * VOLTS_PER_CODE * unit_scale
 
 fig2 = plt.figure(figsize=(15, 8))
+fig2.suptitle(f"Isometric contraction analysis (Ch{args.channels[0]}) - "
+              f"{os.path.basename(csv_path)}", fontsize=12)
+
 gs = fig2.add_gridspec(2, 2, height_ratios=[1.2, 1])
 # magnitude plot spans the full top row (both columns)
 ax_mag = fig2.add_subplot(gs[0, :])
-ax_mag.plot(t, emg_filtered[:, plot_indices[0]], color="0.7", linewidth=0.4,
+ax_mag.plot(t, emg_filtered_uv[:, plot_indices[0]], color="0.7", linewidth=0.4,
             label="Filtered EMG")
 ax_mag.plot(t, env_ch, "r-", linewidth=1.2, label="Envelope")
-ax_mag.set_ylabel(f"Ch{args.channels[0]}")
+ax_mag.set_ylabel(f"Ch{args.channels[0]} ({unit})")
+ax_mag.set_xlabel("Time (s)")
 ax_mag.legend(loc="upper right", fontsize=8)
 ax_mag.grid(True, alpha=0.3)
 ax_mag.set_title("Filtered EMG magnitude + linear envelope")
@@ -256,18 +285,34 @@ for ax, contractions, cmap, name in [
         (fig2.add_subplot(gs[1, 0]), strong, cmap_strong, "Strong"),
         (fig2.add_subplot(gs[1, 1]), weak, cmap_weak, "Weak")]:
     bottom_axes.append(ax)
-    curves = normalized_envelopes(env_ch, contractions, global_max)
+    curves = normalized_envelopes(env_ch, contractions)
+    # x-axis in seconds: 0 = contraction onset (threshold crossing);
+    # -20..120 % of duration mapped to seconds via the group's mean duration
+    if contractions:
+        mean_dur = np.mean([b - a for (a, b) in contractions])
+    else:
+        mean_dur = 1.0
+    x_axis = np.linspace(-20, 120, NORM_PTS) / 100.0 * mean_dur
+    global_max = np.nanmax(env_ch)
     for k, c in enumerate(curves):
-        ax.plot(np.linspace(0, 100, NORM_PTS), 100.0 * c / global_max,
-                color=cmap[k], linewidth=1.2, label=f"{name} {k+1}")
+        ax.plot(x_axis, 100.0 * c / global_max, color="0.75", linewidth=0.8,
+                alpha=0.6, linestyle="--",
+                label="Individual" if k == 0 else None)  # grey dashed individual
     if len(curves):
-        mean_curve = 100.0 * np.mean(curves, axis=0) / global_max
-        ax.plot(np.linspace(0, 100, NORM_PTS), mean_curve, "k-", linewidth=2.5, label="Mean")
+        mean_curve = np.mean(curves, axis=0)
+        # 90 % confidence interval of the mean across contractions
+        ci = 1.645 * np.std(curves, axis=0, ddof=1) / np.sqrt(len(curves)) if len(curves) > 1 \
+            else np.zeros_like(mean_curve)
+        ax.fill_between(x_axis, 100.0 * (mean_curve - ci) / global_max,
+                        100.0 * (mean_curve + ci) / global_max,
+                        color="0.5", alpha=0.3, linewidth=0, label="90% CI")
+        ax.plot(x_axis, 100.0 * mean_curve / global_max, "k-", linewidth=2.5, label="Mean")
     ax.set_ylabel("Envelope (% of global max)")
-    ax.set_xlabel("Contraction duration (%)")
+    ax.set_xlabel("Time from contraction onset (s)")
+    ax.set_xlim(x_axis[0], x_axis[-1])
     ax.set_title(f"{name} contractions (n={len(curves)})")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="lower right", fontsize=8)
+    ax.legend(loc="upper right", fontsize=8)
 # auto-scale each subplot independently so weak contractions fill their window,
 # but the y-axis label shows "% of global max" so the scale is comparable
 fig2.suptitle(f"Isometric contraction analysis (Ch{args.channels[0]}) - "
