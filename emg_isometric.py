@@ -227,22 +227,23 @@ print("=" * 60)
 NORM_PTS = 101  # 0..100 %
 
 
-def normalized_envelopes(env, contractions):
-    """Resample each contraction envelope to -20..120 % of its duration
-    (20 % before/after context included). Amplitude in µV (raw envelope)."""
-    curves = []
+def contraction_segments(env, contractions):
+    """Extract each contraction envelope with 20 % before/after context,
+    on its REAL time axis (seconds relative to its own onset).
+    No time rescaling: longer contractions simply last longer.
+    Returns list of (x_rel, y) arrays."""
+    out = []
     for (a, b) in contractions:
         pad = 0.2 * (b - a)
         i0 = max(0, int((a - pad) * fs))
         i1 = min(n_full, int((b + pad) * fs))
         seg = env[i0:i1]
-        seg = seg[~np.isnan(seg)]
-        if len(seg) < 10:
+        t_seg = np.arange(i0, i1) / fs - a  # seconds relative to onset
+        valid = ~np.isnan(seg)
+        if valid.sum() < 10:
             continue
-        x_old = np.linspace(-20, 120, len(seg))
-        x_new = np.linspace(-20, 120, NORM_PTS)
-        curves.append(np.interp(x_new, x_old, seg))
-    return np.array(curves)
+        out.append((t_seg[valid], seg[valid]))
+    return out
 
 
 # unit selection: explicit --unit wins, otherwise auto (uV if max < 1 mV, else mV)
@@ -285,32 +286,44 @@ for ax, contractions, cmap, name in [
         (fig2.add_subplot(gs[1, 0]), strong, cmap_strong, "Strong"),
         (fig2.add_subplot(gs[1, 1]), weak, cmap_weak, "Weak")]:
     bottom_axes.append(ax)
-    curves = normalized_envelopes(env_ch, contractions)
-    # x-axis in seconds: 0 = contraction onset (threshold crossing);
-    # -20..120 % of duration mapped to seconds via the group's mean duration
-    if contractions:
-        mean_dur = np.mean([b - a for (a, b) in contractions])
+    segs = contraction_segments(env_ch, contractions)
+    # x-axis in seconds: 0 = contraction onset (threshold crossing), real time.
+    # Contractions are aligned at onset; ends are NOT aligned (durations differ).
+    if segs:
+        x_min = min(s[0][0] for s in segs)
+        x_max = max(s[0][-1] for s in segs)
     else:
-        mean_dur = 1.0
-    x_axis = np.linspace(-20, 120, NORM_PTS) / 100.0 * mean_dur
+        x_min, x_max = -1.0, 1.0
     global_max = np.nanmax(env_ch)
-    for k, c in enumerate(curves):
-        ax.plot(x_axis, 100.0 * c / global_max, color="0.75", linewidth=0.8,
+    # extend every individual contraction to the longest duration: beyond its
+    # own end, np.interp holds its last value constant, so all dashed lines
+    # span the same time frame (aligned at onset, equal length on the right).
+    if segs:
+        t_start = min(s[0][0] for s in segs)
+        t_end = max(s[0][-1] for s in segs)
+        t_common = np.arange(t_start, t_end, 0.01)
+    for k, (x_seg, y_seg) in enumerate(segs):
+        y_ext = np.interp(t_common, x_seg, y_seg)
+        ax.plot(t_common, 100.0 * y_ext / global_max, color="0.85", linewidth=0.8,
                 alpha=0.6, linestyle="--",
-                label="Individual" if k == 0 else None)  # grey dashed individual
-    if len(curves):
-        mean_curve = np.mean(curves, axis=0)
-        # 90 % confidence interval of the mean across contractions
-        ci = 1.645 * np.std(curves, axis=0, ddof=1) / np.sqrt(len(curves)) if len(curves) > 1 \
+                label="Individual" if k == 0 else None)  # light grey dashed individual
+    if segs:
+        # mean + 90 % CI across the FULL window: from 20 % before the earliest
+        # onset to 20 % after the latest end. Beyond a contraction's own end,
+        # np.interp holds its last value constant, so the CI widens there.
+        interp = np.array([np.interp(t_common, s[0], s[1]) for s in segs])
+        mean_curve = np.mean(interp, axis=0)
+        ci = 1.645 * np.std(interp, axis=0, ddof=1) / np.sqrt(len(interp)) if len(interp) > 1 \
             else np.zeros_like(mean_curve)
-        ax.fill_between(x_axis, 100.0 * (mean_curve - ci) / global_max,
+        ax.fill_between(t_common, 100.0 * (mean_curve - ci) / global_max,
                         100.0 * (mean_curve + ci) / global_max,
-                        color="0.5", alpha=0.3, linewidth=0, label="90% CI")
-        ax.plot(x_axis, 100.0 * mean_curve / global_max, "k-", linewidth=2.5, label="Mean")
+                        color="0.35", alpha=0.35, linewidth=0, label="90% CI")
+        ax.plot(t_common, 100.0 * mean_curve / global_max, color="black",
+                linewidth=2.5, label="Mean")
     ax.set_ylabel("Envelope (% of global max)")
     ax.set_xlabel("Time from contraction onset (s)")
-    ax.set_xlim(x_axis[0], x_axis[-1])
-    ax.set_title(f"{name} contractions (n={len(curves)})")
+    ax.set_xlim(x_min, x_max)
+    ax.set_title(f"{name} contractions (n={len(segs)})")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=8)
 # auto-scale each subplot independently so weak contractions fill their window,
