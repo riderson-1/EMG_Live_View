@@ -295,31 +295,28 @@ for ax, contractions, cmap, name in [
     else:
         x_min, x_max = -1.0, 1.0
     global_max = np.nanmax(env_ch)
-    # extend every individual contraction to the longest duration: beyond its
-    # own end, np.interp holds its last value constant, so all dashed lines
-    # span the same time frame (aligned at onset, equal length on the right).
-    if segs:
-        t_start = min(s[0][0] for s in segs)
-        t_end = max(s[0][-1] for s in segs)
-        t_common = np.arange(t_start, t_end, 0.01)
+    # Each contraction is plotted only over its own real time range
+    # (-20 % before onset to +20 % after its end). No holding/extrapolation.
     for k, (x_seg, y_seg) in enumerate(segs):
-        y_ext = np.interp(t_common, x_seg, y_seg)
-        ax.plot(t_common, 100.0 * y_ext / global_max, color="0.85", linewidth=0.8,
+        ax.plot(x_seg, 100.0 * y_seg / global_max, color="0.85", linewidth=0.8,
                 alpha=0.6, linestyle="--",
                 label="Individual" if k == 0 else None)  # light grey dashed individual
     if segs:
-        # mean + 90 % CI across the FULL window: from 20 % before the earliest
-        # onset to 20 % after the latest end. Beyond a contraction's own end,
-        # np.interp holds its last value constant, so the CI widens there.
+        # mean + 90 % CI only where ALL contractions are active. As soon as
+        # one trace ends, the mean stops (no partial-n averaging).
+        n_all = len(segs)
+        t_start = min(s[0][0] for s in segs)
+        t_end = min(s[0][-1] for s in segs)  # stop at the earliest end
+        t_common = np.arange(t_start, t_end, 0.01)
         interp = np.array([np.interp(t_common, s[0], s[1]) for s in segs])
         mean_curve = np.mean(interp, axis=0)
-        ci = 1.645 * np.std(interp, axis=0, ddof=1) / np.sqrt(len(interp)) if len(interp) > 1 \
+        ci = 1.645 * np.std(interp, axis=0, ddof=1) / np.sqrt(n_all) if n_all > 1 \
             else np.zeros_like(mean_curve)
         ax.fill_between(t_common, 100.0 * (mean_curve - ci) / global_max,
                         100.0 * (mean_curve + ci) / global_max,
                         color="0.35", alpha=0.35, linewidth=0, label="90% CI")
         ax.plot(t_common, 100.0 * mean_curve / global_max, color="black",
-                linewidth=2.5, label="Mean")
+                linewidth=2.5, label=f"Mean (n={n_all})")
     ax.set_ylabel("Envelope (% of global max)")
     ax.set_xlabel("Time from contraction onset (s)")
     ax.set_xlim(x_min, x_max)
