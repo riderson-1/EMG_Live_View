@@ -40,13 +40,28 @@ parser.add_argument("--labels", type=str, default=None,
                     help='Comma-separated labels for manual contractions: "s" or "w" per contraction, '
                          'e.g. "s,s,w,w". Only used with --contractions.')
 parser.add_argument("--save", type=str, default=None, help="Save figures to PNG files with this prefix.")
+parser.add_argument("--save-results", action="store_true",
+                    help="Write the PNG figures and a terminal-output log file into the same "
+                         "folder as the CSV file (named after the CSV).")
 parser.add_argument("--gain", type=float, default=1.0,
                     help="ADS1299 PGA gain used during recording, for converting ADC codes to "
                          "microvolts (Vref = 4.5 V). Default 1.")
 parser.add_argument("--unit", type=str, default=None,
                     help="Y-axis unit for the magnitude plot: 'uV', 'mV' or 'V'. "
                          "Default: auto (uV if max < 1 mV, else mV).")
+parser.add_argument("--compare-channels", action="store_true",
+                    help="Compare all channels: print signal, noise and SNR for every "
+                         "contraction of every channel, plus best/worst channels.")
 args = parser.parse_args()
+
+# ===== LOG CAPTURE (--save-results) =====
+# When saving results, tee all terminal output into a log file next to the CSV.
+if args.save_results:
+    import contextlib
+    import io
+    _log_buf = io.StringIO()
+    _log_ctx = contextlib.redirect_stdout(_log_buf)
+    _log_ctx.__enter__()
 
 # ===== LOAD CSV =====
 csv_path = args.csv
@@ -223,6 +238,73 @@ print(f"Weak   ({len(weak)}): " + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in weak
 print(f"Total: {len(strong) + len(weak)}")
 print("=" * 60)
 
+# ===== CHANNEL COMPARISON (--compare-channels) =====
+if args.compare_channels:
+    all_contractions = strong + weak
+    print("\n" + "=" * 70)
+    print("CHANNEL COMPARISON (signal / noise / SNR per contraction)")
+    print("=" * 70)
+    print(f"Contractions used: {len(all_contractions)} "
+          f"({len(strong)} strong, {len(weak)} weak)")
+    print(f"Signal = mean envelope during contraction; "
+          f"Noise = mean envelope in the 20 % before onset.")
+    print("-" * 70)
+
+    # per-channel aggregate metrics
+    ch_metrics = []
+    for ci in range(envelopes.shape[1]):
+        env = envelopes[:, ci]
+        sigs, noises = [], []
+        for (a, b) in all_contractions:
+            pad = 0.2 * (b - a)
+            i_sig0, i_sig1 = int(a * fs), int(b * fs)
+            i_noi0 = max(0, int((a - pad) * fs))
+            sig = env[i_sig0:i_sig1]
+            noi = env[i_noi0:i_sig0]
+            sig = sig[~np.isnan(sig)]
+            noi = noi[~np.isnan(noi)]
+            if len(sig) < 10 or len(noi) < 10:
+                continue
+            sigs.append(np.mean(sig))
+            noises.append(np.mean(noi))
+        if not sigs:
+            ch_metrics.append((ci, 0.0, 0.0, 0.0, 0))
+            continue
+        sig_mean = np.mean(sigs)
+        noise_mean = np.mean(noises)
+        snr = sig_mean / noise_mean if noise_mean > 0 else float("inf")
+        ch_metrics.append((ci, sig_mean, noise_mean, snr, len(sigs)))
+
+    # print per-contraction detail + per-channel summary
+    for ci, sig_mean, noise_mean, snr, n in ch_metrics:
+        print(f"\nCh{ci+1}: mean signal {sig_mean:.3g}, mean noise {noise_mean:.3g}, "
+              f"SNR {snr:.2f} (over {n} contractions)")
+        for (a, b) in all_contractions:
+            pad = 0.2 * (b - a)
+            i_sig0, i_sig1 = int(a * fs), int(b * fs)
+            i_noi0 = max(0, int((a - pad) * fs))
+            sig = envelopes[i_sig0:i_sig1, ci]
+            noi = envelopes[i_noi0:i_sig0, ci]
+            sig = sig[~np.isnan(sig)]
+            noi = noi[~np.isnan(noi)]
+            if len(sig) < 10 or len(noi) < 10:
+                continue
+            s, n = np.mean(sig), np.mean(noi)
+            r = s / n if n > 0 else float("inf")
+            print(f"    {a:6.1f}-{b:6.1f}s  signal {s:9.3g}  noise {n:9.3g}  SNR {r:7.2f}")
+
+    # best / worst by SNR
+    valid = [m for m in ch_metrics if m[3] != float("inf")]
+    if valid:
+        best = max(valid, key=lambda m: m[3])
+        worst = min(valid, key=lambda m: m[3])
+        print("\n" + "-" * 70)
+        print(f"BEST channel:  Ch{best[0]+1}  (SNR {best[3]:.2f}, "
+              f"signal {best[1]:.3g}, noise {best[2]:.3g})")
+        print(f"WORST channel: Ch{worst[0]+1}  (SNR {worst[3]:.2f}, "
+              f"signal {worst[1]:.3g}, noise {worst[2]:.3g})")
+        print("=" * 70)
+
 # ===== FIGURE 2: magnitude (top) + strong/weak overlays (bottom row) =====
 NORM_PTS = 101  # 0..100 %
 
@@ -333,5 +415,21 @@ if args.save:
     fig1.savefig(args.save + "_magnitude.png", dpi=150)
     fig2.savefig(args.save + "_overlays.png", dpi=150)
     print(f"Saved: {args.save}_magnitude.png, {args.save}_overlays.png")
+
+if args.save_results:
+    # write PNGs + a log of the terminal output into the CSV's folder
+    out_dir = os.path.dirname(os.path.abspath(csv_path))
+    base = os.path.splitext(os.path.basename(csv_path))[0]
+    png_mag = os.path.join(out_dir, base + "_magnitude.png")
+    png_ovl = os.path.join(out_dir, base + "_overlays.png")
+    log_path = os.path.join(out_dir, base + "_analysis.log")
+    fig1.savefig(png_mag, dpi=150)
+    fig2.savefig(png_ovl, dpi=150)
+    # flush captured stdout to the log file
+    _log_ctx.__exit__(None, None, None)
+    with open(log_path, "w") as f:
+        f.write(_log_buf.getvalue())
+    print(f"Saved figures: {png_mag}, {png_ovl}")
+    print(f"Log file: {log_path}")
 
 plt.show()
