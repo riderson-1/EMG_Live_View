@@ -2,14 +2,16 @@
 set -e  # Stop immediately if any command fails
 
 # --- Logging: everything printed below is also appended to this file ---
-LOG_FILE="${LOG_FILE:-$HOME/sokosti_backup.log}"   # persists after the temp dir is deleted
+LOG_DIR="${LOG_DIR:-$HOME/repos/Sokosti_tools/git_backup_logs}"
+mkdir -p "$LOG_DIR"
+LOG_FILE="${LOG_FILE:-$LOG_DIR/sokosti_backup_$(date +'%Y-%m-%d_%H-%M-%S').log}"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== Backup started: $(date '+%Y-%m-%d %H:%M:%S') ==="
 
 UNIV_REPO="git@version.aalto.fi:bare/sokosti_emg_imu_wearable_system.git"
 GH_ARCHIVE="git@github.com:riderson-1/Sokosti_Measurement_Archive.git"
 
-MAX_FILE_SIZE="50M"   # files larger than this are NOT backed up (find's M = MiB)
+MAX_FILE_SIZE="100M"   # files larger than this are NOT backed up (find's M = MiB)
 
 # Do not download heavy LFS files from GitHub
 export GIT_LFS_SKIP_SMUDGE=1

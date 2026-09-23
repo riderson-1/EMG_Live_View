@@ -39,7 +39,7 @@ def main():
     ap.add_argument("-o", "--output", help="Output .mat file (default: <csv name>_openhdemg.mat next to the CSV)")
     ap.add_argument("--vref", type=float, default=4.5, help="ADS1299 reference voltage (V), default 4.5")
     ap.add_argument("--gain", type=float, default=1, help="ADS1299 PGA gain, default 24")
-    ap.add_argument("--fs", type=int, default=1000, help="Sampling frequency (Hz), default 1000")
+    ap.add_argument("--fs", type=int, default=1001, help="Sampling frequency (Hz), default 1000")
     ap.add_argument("--ied", type=int, default=10, help="Inter-electrode distance (mm), default 10")
     ap.add_argument("--channels", type=int, nargs="+", default=None,
                     help="1-based EMG channels to include (default: all present chN columns)")
