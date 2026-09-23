@@ -39,6 +39,12 @@ parser.add_argument("--contractions", type=str, default=None,
 parser.add_argument("--labels", type=str, default=None,
                     help='Comma-separated labels for manual contractions: "s" or "w" per contraction, '
                          'e.g. "s,s,w,w". Only used with --contractions.')
+parser.add_argument("--strong-windows", type=str, default=None,
+                    help='Manually set STRONG contraction windows in seconds, e.g. "5-11,21-27". '
+                         "Overrides auto-detection for strong contractions.")
+parser.add_argument("--weak-windows", type=str, default=None,
+                    help='Manually set WEAK contraction windows in seconds, e.g. "77-97,117-147". '
+                         "Overrides auto-detection for weak contractions.")
 parser.add_argument("--save", type=str, default=None, help="Save figures to PNG files with this prefix.")
 parser.add_argument("--save-results", action="store_true",
                     help="Write the PNG figures and a terminal-output log file into the same "
@@ -62,6 +68,8 @@ if args.save_results:
     _log_buf = io.StringIO()
     _log_ctx = contextlib.redirect_stdout(_log_buf)
     _log_ctx.__enter__()
+    # record the exact command so the analysis can be rerun
+    _log_buf.write("# Command: " + " ".join(sys.argv) + "\n\n")
 
 # ===== LOAD CSV =====
 csv_path = args.csv
@@ -213,7 +221,11 @@ def detect_contractions(env, thresh_strong_pct, thresh_weak_pct, merge_gap_s,
     return strong, weak
 
 
-if args.contractions:
+if args.strong_windows or args.weak_windows:
+    # manual strong/weak windows set explicitly (either or both)
+    strong = parse_manual(args.strong_windows) if args.strong_windows else []
+    weak = parse_manual(args.weak_windows) if args.weak_windows else []
+elif args.contractions:
     manual = parse_manual(args.contractions)
     if args.labels:
         labels = [x.strip().lower() for x in args.labels.split(",")]
