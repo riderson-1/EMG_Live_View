@@ -21,7 +21,6 @@ Usage:
 import argparse
 import csv
 import os
-from datetime import datetime
 
 from sokosti import FrameParser, PacketSink
 
@@ -32,7 +31,7 @@ def parse_args():
     )
     p.add_argument("binfile", help="Path to the on-board .bin capture file")
     p.add_argument("-o", "--outfile", default=None,
-                   help="Output CSV path (default: captures/sokosti_sd_capture_<ts>.csv)")
+                   help="Output CSV path (default: same location as the .bin file, with .csv extension)")
     p.add_argument("--channels", type=int, default=16, help="Number of EMG channels")
     return p.parse_args()
 
@@ -43,9 +42,7 @@ def main():
     if not os.path.isfile(args.binfile):
         raise SystemExit(f"File not found: {args.binfile}")
 
-    outfile = args.outfile or os.path.join(
-        "captures", f"sokosti_sd_capture_{datetime.now():%Y%m%d_%H%M%S}.csv"
-    )
+    outfile = args.outfile or os.path.splitext(args.binfile)[0] + ".csv"
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
 
     csv_header = (
