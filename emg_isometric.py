@@ -58,6 +58,9 @@ parser.add_argument("--unit", type=str, default=None,
 parser.add_argument("--compare-channels", action="store_true",
                     help="Compare all channels: print signal, noise and SNR for every "
                          "contraction of every channel, plus best/worst channels.")
+parser.add_argument("--psd", choices=["fft", "welch"], default="fft",
+                    help="PSD method for the frequency plot below the magnitude: "
+                         "'fft' (classic FFT magnitude) or 'welch' (Welch PSD). Default: fft.")
 args = parser.parse_args()
 
 # ===== LOG CAPTURE (--save-results) =====
@@ -113,7 +116,7 @@ print(f"Samples: {len(idx)} received, {n_missing} missing ({100.0 * n_missing / 
 # ===== FILTER DESIGN =====
 nyquist = fs / 2
 b_bandpass, a_bandpass = signal.butter(4, [20 / nyquist, 400 / nyquist], btype="bandpass")
-b_notch, a_notch = signal.butter(2, [49 / nyquist, 51 / nyquist], btype="bandstop")
+b_notch, a_notch = signal.butter(2, [48 / nyquist, 52 / nyquist], btype="bandstop")
 b_env, a_env = signal.butter(4, args.env_cutoff / nyquist, btype="lowpass")
 
 
@@ -259,7 +262,8 @@ if args.compare_channels:
     print(f"Contractions used: {len(all_contractions)} "
           f"({len(strong)} strong, {len(weak)} weak)")
     print(f"Signal = mean envelope during contraction; "
-          f"Noise = mean envelope in the 20 % before onset.")
+          f"Noise = mean envelope in the window [a-2*pad, a-pad] before onset, "
+          f"leaving the pad seconds right before onset (the ramp) out.")
     print("-" * 70)
 
     # per-channel aggregate metrics
@@ -270,9 +274,10 @@ if args.compare_channels:
         for (a, b) in all_contractions:
             pad = 0.2 * (b - a)
             i_sig0, i_sig1 = int(a * fs), int(b * fs)
-            i_noi0 = max(0, int((a - pad) * fs))
+            i_noi0 = max(0, int((a - 2 * pad) * fs))
+            i_noi1 = max(0, int((a - pad) * fs))
             sig = env[i_sig0:i_sig1]
-            noi = env[i_noi0:i_sig0]
+            noi = env[i_noi0:i_noi1]
             sig = sig[~np.isnan(sig)]
             noi = noi[~np.isnan(noi)]
             if len(sig) < 10 or len(noi) < 10:
@@ -294,9 +299,10 @@ if args.compare_channels:
         for (a, b) in all_contractions:
             pad = 0.2 * (b - a)
             i_sig0, i_sig1 = int(a * fs), int(b * fs)
-            i_noi0 = max(0, int((a - pad) * fs))
+            i_noi0 = max(0, int((a - 2 * pad) * fs))
+            i_noi1 = max(0, int((a - pad) * fs))
             sig = envelopes[i_sig0:i_sig1, ci]
-            noi = envelopes[i_noi0:i_sig0, ci]
+            noi = envelopes[i_noi0:i_noi1, ci]
             sig = sig[~np.isnan(sig)]
             noi = noi[~np.isnan(noi)]
             if len(sig) < 10 or len(noi) < 10:
@@ -356,11 +362,47 @@ else:
 env_ch = env_v * unit_scale
 emg_filtered_uv = emg_filtered * VOLTS_PER_CODE * unit_scale
 
-fig2 = plt.figure(figsize=(15, 8))
+# ===== PSD helpers (gap-aware, per contiguous segment) =====
+def welch_segment_average(x, fs, min_seg=512, nperseg=1024):
+    """Average Welch PSD over contiguous non-NaN segments of length >= min_seg."""
+    valid = ~np.isnan(x)
+    psds, weights = [], []
+    f_ref = None
+    for (s, e) in valid_segments(valid, min_len=max(min_seg, nperseg)):
+        seg = signal.detrend(x[s:e])
+        f, pxx = signal.welch(seg, fs=fs, nperseg=nperseg, nfft=nperseg)
+        if f_ref is None:
+            f_ref = f
+        psds.append(pxx)
+        weights.append(e - s)
+    if not psds:
+        return None, None, 0
+    pxx_avg = np.average(np.stack(psds), axis=0, weights=weights)
+    return f_ref, pxx_avg, len(psds)
+
+
+def fft_segment_average(x, fs, min_seg=512, nfft=1024):
+    """Average FFT magnitude over contiguous non-NaN segments of length >= min_seg."""
+    valid = ~np.isnan(x)
+    f = np.fft.rfftfreq(nfft, 1 / fs)
+    mags, weights = [], []
+    for (s, e) in valid_segments(valid, min_len=max(min_seg, nfft)):
+        seg = signal.detrend(x[s:e])
+        fft_mag = np.abs(np.fft.rfft(seg, n=nfft))
+        mags.append(fft_mag)
+        weights.append(e - s)
+    if not mags:
+        return None, None, 0
+    mag_avg = np.average(np.stack(mags), axis=0, weights=weights)
+    return f, mag_avg, len(mags)
+
+
+fig2 = plt.figure(figsize=(15, 10))
 fig2.suptitle(f"Isometric contraction analysis (Ch{args.channels[0]}) - "
               f"{os.path.basename(csv_path)}", fontsize=12)
 
-gs = fig2.add_gridspec(2, 2, height_ratios=[1.2, 1])
+# 3 rows: magnitude (full width), PSD (full width), strong/weak (side by side)
+gs = fig2.add_gridspec(3, 2, height_ratios=[1.2, 1.0, 1.0])
 # magnitude plot spans the full top row (both columns)
 ax_mag = fig2.add_subplot(gs[0, :])
 ax_mag.plot(t, emg_filtered_uv[:, plot_indices[0]], color="0.7", linewidth=0.4,
@@ -372,13 +414,41 @@ ax_mag.legend(loc="upper right", fontsize=8)
 ax_mag.grid(True, alpha=0.3)
 ax_mag.set_title("Filtered EMG magnitude + linear envelope")
 
+# PSD plot spans the middle row (both columns)
+ax_psd = fig2.add_subplot(gs[1, :])
+psd_ch = emg_filtered_uv[:, plot_indices[0]]
+if args.psd == "welch":
+    f_psd, pxx, n_segs = welch_segment_average(psd_ch, fs)
+    if pxx is not None:
+        ax_psd.semilogy(f_psd, pxx, "r-", linewidth=0.8,
+                        label=f"Welch PSD ({n_segs} segment(s))")
+        print(f"Ch{args.channels[0]}: Welch PSD from {n_segs} segment(s)")
+    else:
+        ax_psd.text(0.5, 0.5, "No segment long enough for Welch", ha="center",
+                    transform=ax_psd.transAxes)
+else:
+    f_psd, mag, n_segs = fft_segment_average(psd_ch, fs)
+    if mag is not None:
+        ax_psd.plot(f_psd, mag, "r-", linewidth=0.8,
+                    label=f"FFT magnitude ({n_segs} segment(s))")
+        print(f"Ch{args.channels[0]}: FFT from {n_segs} segment(s)")
+    else:
+        ax_psd.text(0.5, 0.5, "No segment long enough for FFT", ha="center",
+                    transform=ax_psd.transAxes)
+ax_psd.set_ylabel(f"({unit})")
+ax_psd.set_xlabel("Frequency (Hz)")
+ax_psd.set_xlim(0, 500)
+ax_psd.legend(loc="upper right", fontsize=8)
+ax_psd.grid(True, alpha=0.3)
+ax_psd.set_title(f"{'Welch PSD' if args.psd == 'welch' else 'FFT'} (contiguous segments)")
+
 cmap_strong = plt.cm.viridis(np.linspace(0, 0.85, max(len(strong), 1)))
 cmap_weak = plt.cm.viridis(np.linspace(0, 0.85, max(len(weak), 1)))
 
 bottom_axes = []
 for ax, contractions, cmap, name in [
-        (fig2.add_subplot(gs[1, 0]), strong, cmap_strong, "Strong"),
-        (fig2.add_subplot(gs[1, 1]), weak, cmap_weak, "Weak")]:
+        (fig2.add_subplot(gs[2, 0]), strong, cmap_strong, "Strong"),
+        (fig2.add_subplot(gs[2, 1]), weak, cmap_weak, "Weak")]:
     bottom_axes.append(ax)
     segs = contraction_segments(env_ch, contractions)
     # x-axis in seconds: 0 = contraction onset (threshold crossing), real time.
