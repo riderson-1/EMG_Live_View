@@ -61,6 +61,27 @@ parser.add_argument("--compare-channels", action="store_true",
 parser.add_argument("--psd", choices=["fft", "welch"], default="fft",
                     help="PSD method for the frequency plot below the magnitude: "
                          "'fft' (classic FFT magnitude) or 'welch' (Welch PSD). Default: fft.")
+parser.add_argument("--fft-nfft", type=int, default=8192,
+                    help="Number of FFT points (frequency resolution) for the FFT "
+                         "magnitude spectrum. Higher = finer frequency sampling "
+                         "(default 8192).")
+parser.add_argument("--show-windows", action="store_true",
+                    help="Draw vertical lines on the magnitude plot showing the signal "
+                         "(contraction) and noise window boundaries for each contraction, "
+                         "so the SNR windows can be visually inspected.")
+parser.add_argument("--noise-window", type=float, default=20.0,
+                    help="Width of the noise window as a PERCENTAGE of the contraction "
+                         "duration (default 20). The window ends --noise-offset seconds "
+                         "before the contraction onset.")
+parser.add_argument("--noise-offset", type=float, default=1.0,
+                    help="Seconds before the contraction onset where the noise window "
+                         "ends (default 1.0). The noise window spans "
+                         "[onset - offset - window*duration, onset - offset].")
+parser.add_argument("--signal-trim", type=float, default=0.0,
+                    help="Fraction of the contraction duration trimmed symmetrically "
+                         "from BOTH the start and end of the signal window, to exclude "
+                         "the ramp-up and ramp-down and keep only the peak "
+                         "(default 0 = whole contraction).")
 args = parser.parse_args()
 
 # ===== LOG CAPTURE (--save-results) =====
@@ -110,8 +131,36 @@ recon = np.full((n_full, emg_data.shape[1]), np.nan)
 recon[received_mask] = emg_data
 
 n_missing = int((~received_mask).sum())
+
+# ===== GAP STATISTICS (gaps in the sample-counter index column) =====
+d_idx = np.diff(idx)
+gap_positions = np.where(d_idx != 1)[0]
+gap_lengths = [int(d_idx[g] - 1) for g in gap_positions]
+
 print(f"File: {csv_path}")
 print(f"Samples: {len(idx)} received, {n_missing} missing ({100.0 * n_missing / n_full:.2f}%)")
+print(f"Gaps: {len(gap_lengths)} total")
+if gap_lengths:
+    gl = np.array(gap_lengths, dtype=float)
+    print("\n### Gap statistics\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| Number of gaps | {len(gap_lengths)} |")
+    print(f"| Samples missing | {n_missing} ({100.0 * n_missing / n_full:.2f}%) |")
+    print(f"| Gap length mean (samples) | {gl.mean():.1f} +/- {gl.std():.1f} (SD) |")
+    print(f"| Gap length median (samples) | {np.median(gl):.0f} |")
+    print(f"| Gap length min (samples) | {gl.min():.0f} |")
+    print(f"| Gap length max (samples) | {gl.max():.0f} |")
+    print(f"| Gap length mean (ms @{fs} Hz) | {gl.mean()/fs*1000:.1f} +/- {gl.std()/fs*1000:.1f} (SD) |")
+    print(f"| Gap length max (ms @{fs} Hz) | {gl.max()/fs*1000:.0f} |")
+    print("\n### Gap details\n")
+    print("| Start index | Length (samples) | Length (ms) |")
+    print("|-------------|------------------|-------------|")
+    for g, length in zip(gap_positions, gap_lengths):
+        start_idx = int(idx[g])
+        print(f"| {start_idx} | {length} | {length/fs*1000:.0f} |")
+else:
+    print("No gaps detected.")
 
 # ===== FILTER DESIGN =====
 nyquist = fs / 2
@@ -246,36 +295,96 @@ else:
         envelopes[:, plot_indices[0]], args.thresh_strong, args.thresh_weak,
         args.merge_gap, args.strong_min, args.weak_min)
 
-print("=" * 60)
-print("CONTRACTIONS DETECTED")
-print(f"Strong ({len(strong)}): " + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in strong))
-print(f"Weak   ({len(weak)}): " + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in weak))
-print(f"Total: {len(strong) + len(weak)}")
-print("=" * 60)
+print("\n## Contractions detected\n")
+print(f"- **Strong** ({len(strong)}): " + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in strong))
+print(f"- **Weak** ({len(weak)}): " + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in weak))
+print(f"- **Total:** {len(strong) + len(weak)}")
+
+# ===== PSD helpers (gap-aware, per contiguous segment) =====
+def welch_segment_average(x, fs, min_seg=512, nperseg=1024):
+    """Average Welch PSD over contiguous non-NaN segments of length >= min_seg."""
+    valid = ~np.isnan(x)
+    psds, weights = [], []
+    f_ref = None
+    for (s, e) in valid_segments(valid, min_len=max(min_seg, nperseg)):
+        seg = signal.detrend(x[s:e])
+        f, pxx = signal.welch(seg, fs=fs, nperseg=nperseg, nfft=nperseg)
+        if f_ref is None:
+            f_ref = f
+        psds.append(pxx)
+        weights.append(e - s)
+    if not psds:
+        return None, None, 0
+    pxx_avg = np.average(np.stack(psds), axis=0, weights=weights)
+    return f_ref, pxx_avg, len(psds)
+
+
+def fft_segment_average(x, fs, min_seg=512, nfft=8192):
+    """Average FFT magnitude over contiguous non-NaN segments of length >= min_seg.
+
+    Each segment's FFT is computed over its FULL length (no truncation), then
+    interpolated onto a common frequency grid of `nfft` points so segments of
+    different lengths can be averaged. Higher nfft = finer frequency sampling.
+    """
+    valid = ~np.isnan(x)
+    f_grid = np.fft.rfftfreq(nfft, 1 / fs)
+    mags, weights = [], []
+    for (s, e) in valid_segments(valid, min_len=min_seg):
+        seg = signal.detrend(x[s:e])
+        n = len(seg)
+        f_seg = np.fft.rfftfreq(n, 1 / fs)
+        fft_mag = np.abs(np.fft.rfft(seg))
+        mags.append(np.interp(f_grid, f_seg, fft_mag))
+        weights.append(e - s)
+    if not mags:
+        return None, None, 0
+    mag_avg = np.average(np.stack(mags), axis=0, weights=weights)
+    return f_grid, mag_avg, len(mags)
+
+
+def median_frequency(f, power):
+    """Median frequency (MDF): the frequency below which 50% of the total
+    power lies. `power` is the power spectrum (e.g. PSD or FFT magnitude^2)."""
+    cum = np.cumsum(power)
+    total = cum[-1]
+    if total <= 0:
+        return np.nan
+    return float(f[np.searchsorted(cum, 0.5 * total)])
+
 
 # ===== CHANNEL COMPARISON (--compare-channels) =====
 if args.compare_channels:
     all_contractions = strong + weak
-    print("\n" + "=" * 70)
-    print("CHANNEL COMPARISON (signal / noise / SNR per contraction)")
-    print("=" * 70)
-    print(f"Contractions used: {len(all_contractions)} "
+    print("\n## Channel comparison (signal / noise / SNR per contraction)\n")
+    print(f"- Contractions used: **{len(all_contractions)}** "
           f"({len(strong)} strong, {len(weak)} weak)")
-    print(f"Signal = mean envelope during contraction; "
-          f"Noise = mean envelope in the window [a-2*pad, a-pad] before onset, "
-          f"leaving the pad seconds right before onset (the ramp) out.")
-    print("-" * 70)
+    print(f"- Signal = mean envelope over the contraction trimmed symmetrically by "
+          f"`--signal-trim` ({args.signal_trim:.0%} of duration each side)")
+    print(f"- Noise = mean envelope in the window ending `--noise-offset` "
+          f"({args.noise_offset:.1f} s) before onset, spanning "
+          f"`--noise-window` ({args.noise_window:.0f}% of duration)")
+    print(f"- SNR in dB = 20·log10(signal/noise) (amplitude ratio)")
 
     # per-channel aggregate metrics
     ch_metrics = []
     for ci in range(envelopes.shape[1]):
         env = envelopes[:, ci]
+        # MDF from the filtered EMG of this channel (same method as the PSD plot)
+        psd_ch = emg_filtered[:, ci]
+        if args.psd == "welch":
+            f_m, p_m, _ = welch_segment_average(psd_ch, fs)
+            mdf = median_frequency(f_m, p_m) if p_m is not None else np.nan
+        else:
+            f_m, mag_m, _ = fft_segment_average(psd_ch, fs, nfft=args.fft_nfft)
+            mdf = median_frequency(f_m, mag_m ** 2) if mag_m is not None else np.nan
         sigs, noises = [], []
         for (a, b) in all_contractions:
-            pad = 0.2 * (b - a)
-            i_sig0, i_sig1 = int(a * fs), int(b * fs)
-            i_noi0 = max(0, int((a - 2 * pad) * fs))
-            i_noi1 = max(0, int((a - pad) * fs))
+            d = b - a
+            noise_win = (args.noise_window / 100.0) * d
+            i_sig0 = int((a + args.signal_trim * d) * fs)
+            i_sig1 = int((b - args.signal_trim * d) * fs)
+            i_noi0 = max(0, int((a - args.noise_offset - noise_win) * fs))
+            i_noi1 = max(0, int((a - args.noise_offset) * fs))
             sig = env[i_sig0:i_sig1]
             noi = env[i_noi0:i_noi1]
             sig = sig[~np.isnan(sig)]
@@ -285,22 +394,35 @@ if args.compare_channels:
             sigs.append(np.mean(sig))
             noises.append(np.mean(noi))
         if not sigs:
-            ch_metrics.append((ci, 0.0, 0.0, 0.0, 0))
+            ch_metrics.append((ci, 0.0, 0.0, 0.0, 0, np.nan))
             continue
         sig_mean = np.mean(sigs)
         noise_mean = np.mean(noises)
         snr = sig_mean / noise_mean if noise_mean > 0 else float("inf")
-        ch_metrics.append((ci, sig_mean, noise_mean, snr, len(sigs)))
+        ch_metrics.append((ci, sig_mean, noise_mean, snr, len(sigs), mdf))
 
-    # print per-contraction detail + per-channel summary
-    for ci, sig_mean, noise_mean, snr, n in ch_metrics:
-        print(f"\nCh{ci+1}: mean signal {sig_mean:.3g}, mean noise {noise_mean:.3g}, "
-              f"SNR {snr:.2f} (over {n} contractions)")
+    # per-channel summary table
+    print("\n### Per-channel summary\n")
+    print("| Channel | Signal | Noise | SNR | SNR (dB) | MDF (Hz) | n |")
+    print("|---------|--------|-------|-----|----------|----------|---|")
+    for ci, sig_mean, noise_mean, snr, n, mdf in ch_metrics:
+        snr_db = 20.0 * np.log10(snr) if snr > 0 else float("-inf")
+        mdf_s = f"{mdf:.1f}" if not np.isnan(mdf) else "-"
+        print(f"| Ch{ci+1} | {sig_mean:.3g} | {noise_mean:.3g} | {snr:.2f} | "
+              f"{snr_db:.1f} | {mdf_s} | {n} |")
+
+    # per-contraction detail table per channel
+    for ci, sig_mean, noise_mean, snr, n, mdf in ch_metrics:
+        print(f"\n#### Ch{ci+1} per-contraction detail\n")
+        print("| Window (s) | Signal | Noise | SNR | SNR (dB) |")
+        print("|------------|--------|-------|-----|----------|")
         for (a, b) in all_contractions:
-            pad = 0.2 * (b - a)
-            i_sig0, i_sig1 = int(a * fs), int(b * fs)
-            i_noi0 = max(0, int((a - 2 * pad) * fs))
-            i_noi1 = max(0, int((a - pad) * fs))
+            d = b - a
+            noise_win = (args.noise_window / 100.0) * d
+            i_sig0 = int((a + args.signal_trim * d) * fs)
+            i_sig1 = int((b - args.signal_trim * d) * fs)
+            i_noi0 = max(0, int((a - args.noise_offset - noise_win) * fs))
+            i_noi1 = max(0, int((a - args.noise_offset) * fs))
             sig = envelopes[i_sig0:i_sig1, ci]
             noi = envelopes[i_noi0:i_noi1, ci]
             sig = sig[~np.isnan(sig)]
@@ -309,19 +431,21 @@ if args.compare_channels:
                 continue
             s, n = np.mean(sig), np.mean(noi)
             r = s / n if n > 0 else float("inf")
-            print(f"    {a:6.1f}-{b:6.1f}s  signal {s:9.3g}  noise {n:9.3g}  SNR {r:7.2f}")
+            r_db = 20.0 * np.log10(r) if r > 0 else float("-inf")
+            print(f"| {a:.1f}-{b:.1f} | {s:.3g} | {n:.3g} | {r:.2f} | {r_db:.1f} |")
 
     # best / worst by SNR
     valid = [m for m in ch_metrics if m[3] != float("inf")]
     if valid:
         best = max(valid, key=lambda m: m[3])
         worst = min(valid, key=lambda m: m[3])
-        print("\n" + "-" * 70)
-        print(f"BEST channel:  Ch{best[0]+1}  (SNR {best[3]:.2f}, "
-              f"signal {best[1]:.3g}, noise {best[2]:.3g})")
-        print(f"WORST channel: Ch{worst[0]+1}  (SNR {worst[3]:.2f}, "
-              f"signal {worst[1]:.3g}, noise {worst[2]:.3g})")
-        print("=" * 70)
+        print("\n### Best / worst channels\n")
+        print(f"- **BEST channel:** Ch{best[0]+1} (SNR {best[3]:.2f} "
+              f"({20.0*np.log10(best[3]):.1f} dB), signal {best[1]:.3g}, "
+              f"noise {best[2]:.3g}, MDF {best[5]:.1f} Hz)")
+        print(f"- **WORST channel:** Ch{worst[0]+1} (SNR {worst[3]:.2f} "
+              f"({20.0*np.log10(worst[3]):.1f} dB), signal {worst[1]:.3g}, "
+              f"noise {worst[2]:.3g}, MDF {worst[5]:.1f} Hz)")
 
 # ===== FIGURE 2: magnitude (top) + strong/weak overlays (bottom row) =====
 NORM_PTS = 101  # 0..100 %
@@ -362,41 +486,6 @@ else:
 env_ch = env_v * unit_scale
 emg_filtered_uv = emg_filtered * VOLTS_PER_CODE * unit_scale
 
-# ===== PSD helpers (gap-aware, per contiguous segment) =====
-def welch_segment_average(x, fs, min_seg=512, nperseg=1024):
-    """Average Welch PSD over contiguous non-NaN segments of length >= min_seg."""
-    valid = ~np.isnan(x)
-    psds, weights = [], []
-    f_ref = None
-    for (s, e) in valid_segments(valid, min_len=max(min_seg, nperseg)):
-        seg = signal.detrend(x[s:e])
-        f, pxx = signal.welch(seg, fs=fs, nperseg=nperseg, nfft=nperseg)
-        if f_ref is None:
-            f_ref = f
-        psds.append(pxx)
-        weights.append(e - s)
-    if not psds:
-        return None, None, 0
-    pxx_avg = np.average(np.stack(psds), axis=0, weights=weights)
-    return f_ref, pxx_avg, len(psds)
-
-
-def fft_segment_average(x, fs, min_seg=512, nfft=1024):
-    """Average FFT magnitude over contiguous non-NaN segments of length >= min_seg."""
-    valid = ~np.isnan(x)
-    f = np.fft.rfftfreq(nfft, 1 / fs)
-    mags, weights = [], []
-    for (s, e) in valid_segments(valid, min_len=max(min_seg, nfft)):
-        seg = signal.detrend(x[s:e])
-        fft_mag = np.abs(np.fft.rfft(seg, n=nfft))
-        mags.append(fft_mag)
-        weights.append(e - s)
-    if not mags:
-        return None, None, 0
-    mag_avg = np.average(np.stack(mags), axis=0, weights=weights)
-    return f, mag_avg, len(mags)
-
-
 fig2 = plt.figure(figsize=(15, 10))
 fig2.suptitle(f"Isometric contraction analysis (Ch{args.channels[0]}) - "
               f"{os.path.basename(csv_path)}", fontsize=12)
@@ -414,30 +503,57 @@ ax_mag.legend(loc="upper right", fontsize=8)
 ax_mag.grid(True, alpha=0.3)
 ax_mag.set_title("Filtered EMG magnitude + linear envelope")
 
+# optional vertical lines showing the signal/noise windows for each contraction
+if args.show_windows:
+    all_contractions = strong + weak
+    for k, (a, b) in enumerate(all_contractions):
+        d = b - a
+        noise_win = (args.noise_window / 100.0) * d
+        # signal window = contraction trimmed symmetrically [a + trim*d, b - trim*d]
+        ax_mag.axvline(a + args.signal_trim * d, color="g", linestyle="--",
+                       linewidth=1.0, alpha=0.8,
+                       label="Signal window" if k == 0 else None)
+        ax_mag.axvline(b - args.signal_trim * d, color="g", linestyle="--",
+                       linewidth=1.0, alpha=0.8)
+        # noise window = [a - offset - win, a - offset]
+        ax_mag.axvline(a - args.noise_offset - noise_win, color="b", linestyle=":",
+                       linewidth=1.0, alpha=0.8,
+                       label="Noise window" if k == 0 else None)
+        ax_mag.axvline(a - args.noise_offset, color="b", linestyle=":",
+                       linewidth=1.0, alpha=0.8)
+    ax_mag.legend(loc="upper right", fontsize=8)
+
 # PSD plot spans the middle row (both columns)
 ax_psd = fig2.add_subplot(gs[1, :])
 psd_ch = emg_filtered_uv[:, plot_indices[0]]
+mdf = np.nan
 if args.psd == "welch":
     f_psd, pxx, n_segs = welch_segment_average(psd_ch, fs)
     if pxx is not None:
         ax_psd.semilogy(f_psd, pxx, "r-", linewidth=0.8,
                         label=f"Welch PSD ({n_segs} segment(s))")
         print(f"Ch{args.channels[0]}: Welch PSD from {n_segs} segment(s)")
+        mdf = median_frequency(f_psd, pxx)
     else:
         ax_psd.text(0.5, 0.5, "No segment long enough for Welch", ha="center",
                     transform=ax_psd.transAxes)
 else:
-    f_psd, mag, n_segs = fft_segment_average(psd_ch, fs)
+    f_psd, mag, n_segs = fft_segment_average(psd_ch, fs, nfft=args.fft_nfft)
     if mag is not None:
         ax_psd.plot(f_psd, mag, "r-", linewidth=0.8,
                     label=f"FFT magnitude ({n_segs} segment(s))")
         print(f"Ch{args.channels[0]}: FFT from {n_segs} segment(s)")
+        mdf = median_frequency(f_psd, mag ** 2)
     else:
         ax_psd.text(0.5, 0.5, "No segment long enough for FFT", ha="center",
                     transform=ax_psd.transAxes)
 ax_psd.set_ylabel(f"({unit})")
 ax_psd.set_xlabel("Frequency (Hz)")
 ax_psd.set_xlim(0, 500)
+if not np.isnan(mdf):
+    ax_psd.axvline(mdf, color="k", linestyle="--", linewidth=1.2, alpha=0.8,
+                   label=f"MDF {mdf:.1f} Hz")
+    print(f"Ch{args.channels[0]}: MDF {mdf:.1f} Hz")
 ax_psd.legend(loc="upper right", fontsize=8)
 ax_psd.grid(True, alpha=0.3)
 ax_psd.set_title(f"{'Welch PSD' if args.psd == 'welch' else 'FFT'} (contiguous segments)")
@@ -494,16 +610,18 @@ fig2.suptitle(f"Isometric contraction analysis (Ch{args.channels[0]}) - "
 fig2.tight_layout()
 
 if args.save:
-    fig1.savefig(args.save + "_magnitude.png", dpi=150)
-    fig2.savefig(args.save + "_overlays.png", dpi=150)
-    print(f"Saved: {args.save}_magnitude.png, {args.save}_overlays.png")
+    ch_tag = "_".join(f"ch{c}" for c in args.channels)
+    fig1.savefig(args.save + f"_{ch_tag}_magnitude.png", dpi=150)
+    fig2.savefig(args.save + f"_{ch_tag}_overlays.png", dpi=150)
+    print(f"Saved: {args.save}_{ch_tag}_magnitude.png, {args.save}_{ch_tag}_overlays.png")
 
 if args.save_results:
     # write PNGs + a log of the terminal output into the CSV's folder
     out_dir = os.path.dirname(os.path.abspath(csv_path))
     base = os.path.splitext(os.path.basename(csv_path))[0]
-    png_mag = os.path.join(out_dir, base + "_magnitude.png")
-    png_ovl = os.path.join(out_dir, base + "_overlays.png")
+    ch_tag = "_".join(f"ch{c}" for c in args.channels)
+    png_mag = os.path.join(out_dir, base + f"_{ch_tag}_magnitude.png")
+    png_ovl = os.path.join(out_dir, base + f"_{ch_tag}_overlays.png")
     log_path = os.path.join(out_dir, base + "_analysis.log")
     fig1.savefig(png_mag, dpi=150)
     fig2.savefig(png_ovl, dpi=150)
