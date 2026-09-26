@@ -9,7 +9,9 @@ Usage:
 
 By default --start and --end are the first and last sample of the file, so
 running without them just copies the file. Provide them as timestamps in
-seconds to crop.
+seconds to crop. The timestamps are relative to the first sample in the file
+(e.g. --start 8.9 keeps everything from 8.9 s after the first sample), so the
+file's starting sample index does not matter.
 
 Examples:
     # Keep only seconds 10..30
@@ -57,13 +59,16 @@ def main() -> int:
         print("error: no 'sample' column found in CSV", file=sys.stderr)
         return 1
 
-    # Convert seconds -> sample index (0-indexed counter)
-    start_sample = int(round(args.start * args.fs)) if args.start is not None else 0
-    end_sample = int(round(args.end * args.fs)) if args.end is not None else df["sample"].iloc[-1]
+    first_sample = int(df["sample"].iloc[0])
+    last_sample = int(df["sample"].iloc[-1])
+
+    # Convert seconds -> sample index, relative to the first sample in the file
+    start_sample = first_sample + int(round(args.start * args.fs)) if args.start is not None else first_sample
+    end_sample = first_sample + int(round(args.end * args.fs)) if args.end is not None else last_sample
 
     # Clamp to valid range
-    start_sample = max(0, start_sample)
-    end_sample = min(int(df["sample"].iloc[-1]), end_sample)
+    start_sample = max(first_sample, start_sample)
+    end_sample = min(last_sample, end_sample)
 
     if start_sample > end_sample:
         print("error: --start is after --end", file=sys.stderr)
