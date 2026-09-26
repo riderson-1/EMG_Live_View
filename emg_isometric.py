@@ -329,7 +329,8 @@ def fft_segment_average(x, fs, min_seg=512, nfft=8192):
     valid = ~np.isnan(x)
     f_grid = np.fft.rfftfreq(nfft, 1 / fs)
     mags, weights = [], []
-    for (s, e) in valid_segments(valid, min_len=min_seg):
+    segs = valid_segments(valid, min_len=min_seg)
+    for (s, e) in segs:
         seg = signal.detrend(x[s:e])
         n = len(seg)
         f_seg = np.fft.rfftfreq(n, 1 / fs)
@@ -337,9 +338,9 @@ def fft_segment_average(x, fs, min_seg=512, nfft=8192):
         mags.append(np.interp(f_grid, f_seg, fft_mag))
         weights.append(e - s)
     if not mags:
-        return None, None, 0
+        return None, None, 0, []
     mag_avg = np.average(np.stack(mags), axis=0, weights=weights)
-    return f_grid, mag_avg, len(mags)
+    return f_grid, mag_avg, len(mags), segs
 
 
 def median_frequency(f, power):
@@ -375,7 +376,7 @@ if args.compare_channels:
             f_m, p_m, _ = welch_segment_average(psd_ch, fs)
             mdf = median_frequency(f_m, p_m) if p_m is not None else np.nan
         else:
-            f_m, mag_m, _ = fft_segment_average(psd_ch, fs, nfft=args.fft_nfft)
+            f_m, mag_m, _, _ = fft_segment_average(psd_ch, fs, nfft=args.fft_nfft)
             mdf = median_frequency(f_m, mag_m ** 2) if mag_m is not None else np.nan
         sigs, noises = [], []
         for (a, b) in all_contractions:
@@ -538,11 +539,17 @@ if args.psd == "welch":
         ax_psd.text(0.5, 0.5, "No segment long enough for Welch", ha="center",
                     transform=ax_psd.transAxes)
 else:
-    f_psd, mag, n_segs = fft_segment_average(psd_ch, fs, nfft=args.fft_nfft)
+    f_psd, mag, n_segs, segs = fft_segment_average(psd_ch, fs, nfft=args.fft_nfft)
     if mag is not None:
         ax_psd.plot(f_psd, mag, "r-", linewidth=0.8,
                     label=f"FFT magnitude ({n_segs} segment(s))")
         print(f"Ch{args.channels[0]}: FFT from {n_segs} segment(s)")
+        if segs:
+            print("\n### FFT segments\n")
+            print("| Segment | Start index | End index | Length (samples) | Duration (s) |")
+            print("|---------|-------------|-----------|------------------|--------------|")
+            for k, (s, e) in enumerate(segs, 1):
+                print(f"| {k} | {s} | {e-1} | {e-s} | {(e-s)/fs:.2f} |")
         mdf = median_frequency(f_psd, mag ** 2)
     else:
         ax_psd.text(0.5, 0.5, "No segment long enough for FFT", ha="center",
