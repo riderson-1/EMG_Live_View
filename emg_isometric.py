@@ -89,11 +89,14 @@ args = parser.parse_args()
 if args.save_results:
     import contextlib
     import io
+    import shlex
     _log_buf = io.StringIO()
     _log_ctx = contextlib.redirect_stdout(_log_buf)
     _log_ctx.__enter__()
-    # record the exact command so the analysis can be rerun
-    _log_buf.write("# Command: " + " ".join(sys.argv) + "\n\n")
+    # record the exact command so the analysis can be rerun immediately:
+    # "python" prefix + shell-quoted arguments (preserves quotes around
+    # arguments containing spaces, e.g. the manual window lists)
+    _log_buf.write("# Command: python " + " ".join(shlex.quote(a) for a in sys.argv[1:]) + "\n\n")
 
 # ===== LOAD CSV =====
 csv_path = args.csv
@@ -353,6 +356,21 @@ def median_frequency(f, power):
     return float(f[np.searchsorted(cum, 0.5 * total)])
 
 
+# ===== UNIT SELECTION =====
+# explicit --unit wins, otherwise auto (uV if max < 1 mV, else mV).
+# Done here so the --compare-channels tables are scaled the same way as the plots.
+env_v = envelopes[:, plot_indices[0]] * VOLTS_PER_CODE
+max_v = np.nanmax(env_v)
+if args.unit:
+    u = args.unit.lower().strip()
+    unit_scale = {"uv": 1e6, "µv": 1e6, "mv": 1e3, "v": 1.0}[u]
+    unit = {"uv": "µV", "µv": "µV", "mv": "mV", "v": "V"}[u]
+else:
+    if max_v < 1e-3:
+        unit_scale, unit = 1e6, "µV"
+    else:
+        unit_scale, unit = 1e3, "mV"
+
 # ===== CHANNEL COMPARISON (--compare-channels) =====
 if args.compare_channels:
     all_contractions = strong + weak
@@ -365,6 +383,8 @@ if args.compare_channels:
           f"({args.noise_offset:.1f} s) before onset, spanning "
           f"`--noise-window` ({args.noise_window:.0f}% of duration)")
     print(f"- SNR in dB = 20·log10(signal/noise) (amplitude ratio)")
+    print(f"- Values in **{unit}** (gain {args.gain:g} applied: "
+          f"{VOLTS_PER_CODE:.3e} V/code)")
 
     # per-channel aggregate metrics
     ch_metrics = []
@@ -397,14 +417,14 @@ if args.compare_channels:
         if not sigs:
             ch_metrics.append((ci, 0.0, 0.0, 0.0, 0, np.nan))
             continue
-        sig_mean = np.mean(sigs)
-        noise_mean = np.mean(noises)
+        sig_mean = np.mean(sigs) * unit_scale
+        noise_mean = np.mean(noises) * unit_scale
         snr = sig_mean / noise_mean if noise_mean > 0 else float("inf")
         ch_metrics.append((ci, sig_mean, noise_mean, snr, len(sigs), mdf))
 
     # per-channel summary table
     print("\n### Per-channel summary\n")
-    print("| Channel | Signal | Noise | SNR | SNR (dB) | MDF (Hz) | n |")
+    print(f"| Channel | Signal ({unit}) | Noise ({unit}) | SNR | SNR (dB) | MDF (Hz) | n |")
     print("|---------|--------|-------|-----|----------|----------|---|")
     for ci, sig_mean, noise_mean, snr, n, mdf in ch_metrics:
         snr_db = 20.0 * np.log10(snr) if snr > 0 else float("-inf")
@@ -415,7 +435,7 @@ if args.compare_channels:
     # per-contraction detail table per channel
     for ci, sig_mean, noise_mean, snr, n, mdf in ch_metrics:
         print(f"\n#### Ch{ci+1} per-contraction detail\n")
-        print("| Window (s) | Signal | Noise | SNR | SNR (dB) |")
+        print(f"| Window (s) | Signal ({unit}) | Noise ({unit}) | SNR | SNR (dB) |")
         print("|------------|--------|-------|-----|----------|")
         for (a, b) in all_contractions:
             d = b - a
@@ -430,7 +450,7 @@ if args.compare_channels:
             noi = noi[~np.isnan(noi)]
             if len(sig) < 10 or len(noi) < 10:
                 continue
-            s, n = np.mean(sig), np.mean(noi)
+            s, n = np.mean(sig) * unit_scale, np.mean(noi) * unit_scale
             r = s / n if n > 0 else float("inf")
             r_db = 20.0 * np.log10(r) if r > 0 else float("-inf")
             print(f"| {a:.1f}-{b:.1f} | {s:.3g} | {n:.3g} | {r:.2f} | {r_db:.1f} |")
@@ -442,11 +462,11 @@ if args.compare_channels:
         worst = min(valid, key=lambda m: m[3])
         print("\n### Best / worst channels\n")
         print(f"- **BEST channel:** Ch{best[0]+1} (SNR {best[3]:.2f} "
-              f"({20.0*np.log10(best[3]):.1f} dB), signal {best[1]:.3g}, "
-              f"noise {best[2]:.3g}, MDF {best[5]:.1f} Hz)")
+              f"({20.0*np.log10(best[3]):.1f} dB), signal {best[1]:.3g} {unit}, "
+              f"noise {best[2]:.3g} {unit}, MDF {best[5]:.1f} Hz)")
         print(f"- **WORST channel:** Ch{worst[0]+1} (SNR {worst[3]:.2f} "
-              f"({20.0*np.log10(worst[3]):.1f} dB), signal {worst[1]:.3g}, "
-              f"noise {worst[2]:.3g}, MDF {worst[5]:.1f} Hz)")
+              f"({20.0*np.log10(worst[3]):.1f} dB), signal {worst[1]:.3g} {unit}, "
+              f"noise {worst[2]:.3g} {unit}, MDF {worst[5]:.1f} Hz)")
 
 # ===== FIGURE 2: magnitude (top) + strong/weak overlays (bottom row) =====
 NORM_PTS = 101  # 0..100 %
@@ -470,19 +490,6 @@ def contraction_segments(env, contractions):
         out.append((t_seg[valid], seg[valid]))
     return out
 
-
-# unit selection: explicit --unit wins, otherwise auto (uV if max < 1 mV, else mV)
-env_v = envelopes[:, plot_indices[0]] * VOLTS_PER_CODE
-max_v = np.nanmax(env_v)
-if args.unit:
-    u = args.unit.lower().strip()
-    unit_scale = {"uv": 1e6, "µv": 1e6, "mv": 1e3, "v": 1.0}[u]
-    unit = {"uv": "µV", "µv": "µV", "mv": "mV", "v": "V"}[u]
-else:
-    if max_v < 1e-3:
-        unit_scale, unit = 1e6, "µV"
-    else:
-        unit_scale, unit = 1e3, "mV"
 
 env_ch = env_v * unit_scale
 emg_filtered_uv = emg_filtered * VOLTS_PER_CODE * unit_scale
