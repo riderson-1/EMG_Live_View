@@ -140,9 +140,17 @@ def plot_snr(trials, ctype, ylim_left, ylim_right, log_scale, out_stem):
                                 alpha=0.7, linewidth=1.2, zorder=2))
         ax1.scatter(xi, mean, marker="D", s=70, facecolor="royalblue",
                     edgecolor="black", zorder=4)
+        # label the mean value ABOVE the diamond (clears the box)
+        ax1.annotate(f"{mean:.1f}", (xi, mean), textcoords="offset points",
+                     xytext=(0, -25), ha="center", va="bottom", fontsize=9,
+                     color="royalblue", fontweight="bold")
         # one noise value per trial (same for strong and weak)
         ax1.hlines(t["noise"], xi - NOISE_HALF_WIDTH, xi + NOISE_HALF_WIDTH,
                    colors="dimgray", linewidths=3, zorder=4)
+        # label the noise value BELOW the noise line (clears the box)
+        ax1.annotate(f"{t['noise']:.2f}", (xi, t["noise"]),
+                     textcoords="offset points", xytext=(0, 10), ha="center",
+                     va="top", fontsize=9, color="dimgray")
 
     ax1.set_yscale("log" if log_scale else "linear")
     ax1.set_ylim(*ylim_left)
@@ -163,6 +171,11 @@ def plot_snr(trials, ctype, ylim_left, ylim_right, log_scale, out_stem):
     snrs = [snr_db(t[ctype], t["noise"]) for t in trials]
     ax2.scatter(x, snrs, color="crimson", s=150, marker="o",
                 edgecolors="black", linewidths=1.5, zorder=5)
+    # label each SNR value ABOVE its dot (clears the dot and axis)
+    for xi, s in zip(x, snrs):
+        ax2.annotate(f"{s:.1f}", (xi, s), textcoords="offset points",
+                     xytext=(0, 10), ha="center", va="bottom", fontsize=9,
+                     color="crimson", fontweight="bold")
     ax2.set_ylim(*ylim_right)
     ax2.set_ylabel("SNR (dB)", color="crimson", fontsize=12)
     ax2.tick_params(axis="y", labelcolor="crimson")
