@@ -70,6 +70,15 @@ def load(path, sheet):
         raise SystemExit("No 'gain' column in sheet 'trials'. "
                          "Regenerate the workbook with parse_emg_logs.py.")
     df = df.merge(trials_sheet[["trial_id", "gain"]], on="trial_id", how="left")
+    # per-channel MDF (one value per trial x channel, already a mean over the
+    # contractions used) lives in the 'mdf' sheet; join it so the selected
+    # channel's MDF can be reported alongside its SNR.
+    mdf_sheet = pd.read_excel(path, sheet_name="mdf")
+    if "mdf_hz" not in mdf_sheet.columns:
+        raise SystemExit("No 'mdf_hz' column in sheet 'mdf'. "
+                         "Regenerate the workbook with parse_emg_logs.py.")
+    df = df.merge(mdf_sheet[["trial_id", "channel", "mdf_hz"]],
+                  on=["trial_id", "channel"], how="left")
     df = df[df["source"] == SOURCE].copy()
     if df.empty:
         raise SystemExit(f"No rows with source == '{SOURCE}'.")
@@ -114,6 +123,7 @@ def build_trials(df):
             "date": str(first["date"])[:10],
             "connection": first["connection"],
             "gain": int(first["gain"]),
+            "mdf_hz": float(first["mdf_hz"]),
             "noise": float(ch.loc[(tid, chan), "noise_uV"]),
             "strong": sub.loc[sub["contraction_type"] == "strong", "signal_uV"].to_numpy(float),
             "weak": sub.loc[sub["contraction_type"] == "weak", "signal_uV"].to_numpy(float),
@@ -222,6 +232,7 @@ def main():
         rows.append({
             "trial_id": t["trial_id"], "subject": t["subject"], "date": t["date"],
             "connection": t["connection"], "gain": t["gain"], "channel": t["channel"],
+            "mdf_hz": t["mdf_hz"],
             "noise_uV": t["noise"], "noise_sd_uV": r["noise_sd"], "noise_n": int(r["noise_n"]),
             "excluded_first_weak_rest_noise_uV": r["excluded_rest_noise_uV"],
             "strong_n": len(t["strong"]), "strong_min_uV": t["strong"].min(),
