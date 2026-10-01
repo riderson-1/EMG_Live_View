@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-SNR plots for the six PC isometric trials (one figure for STRONG, one for WEAK).
+SNR plots for the PC and SD isometric trials
+(one figure for STRONG, one for WEAK, per source).
 
 Input : emg_isometric_summary.ods (sheet 'snr', all values in uV)
-Output: snr_strong.(png|pdf), snr_weak.(png|pdf), snr_plot_data.csv
+Output: snr_strong_pc.(png|pdf), snr_weak_pc.(png|pdf),
+        snr_strong_sd.(png|pdf), snr_weak_sd.(png|pdf),
+        snr_plot_data.csv
 
-Method (per trial, PC recordings only)
+Method (per trial, per source)
   1. Noise floor of a channel = mean (or median, --noise-stat) of noise_uV over
      the weak contractions 2..4 (chronological rank within the weak
      contractions). The rest before the FIRST weak contraction is excluded
@@ -17,6 +20,8 @@ Method (per trial, PC recordings only)
   3. SNR (dB) = 20*log10(mean signal / noise floor), one dot per trial and plot.
   4. Channel per trial = highest mean of (strong SNR dB, weak SNR dB), so one
      channel is used for both plots.
+
+Use --source PC, --source SD, or --source both (default: both).
 """
 import argparse
 from pathlib import Path
@@ -29,7 +34,6 @@ from matplotlib.patches import Patch, Rectangle
 from matplotlib.ticker import FuncFormatter
 
 # ===== SETTINGS =====
-SOURCE = "PC"                 # recording source to use (SD trials excluded for now)
 NOISE_SKIP_FIRST_WEAK = 1     # number of leading weak rests excluded from the noise floor
 BOX_WIDTH = 0.4
 NOISE_HALF_WIDTH = 0.25
@@ -39,7 +43,7 @@ REQUIRED_COLS = ["trial_id", "subject", "date", "connection", "source", "channel
                  "contraction_type", "window_start_s", "signal_uV", "noise_uV"]
 
 # ===== ARGUMENTS =====
-parser = argparse.ArgumentParser(description="Strong/weak SNR plots for the six PC trials.")
+parser = argparse.ArgumentParser(description="Strong/weak SNR plots for PC and SD isometric trials.")
 parser.add_argument("ods", help="Path to the summary workbook "
                                  "(e.g. /home/karl/Documents/Master_Thesis/Testing/"
                                  "application_testing/emg_isometric_summary.ods)")
@@ -52,6 +56,8 @@ parser.add_argument("--linear", action="store_true",
 parser.add_argument("--separate-ylim", action="store_true",
                     help="Use separate y-limits for the strong and the weak plot.")
 parser.add_argument("--no-show", action="store_true", help="Save the figures without opening windows.")
+parser.add_argument("--source", choices=["PC", "SD", "both"], default="both",
+                    help="Recording source to plot (default: both).")
 args = parser.parse_args()
 
 
@@ -79,9 +85,6 @@ def load(path, sheet):
                          "Regenerate the workbook with parse_emg_logs.py.")
     df = df.merge(mdf_sheet[["trial_id", "channel", "mdf_hz"]],
                   on=["trial_id", "channel"], how="left")
-    df = df[df["source"] == SOURCE].copy()
-    if df.empty:
-        raise SystemExit(f"No rows with source == '{SOURCE}'.")
     bad = df[~df["contraction_type"].isin(["strong", "weak"])]
     if len(bad):
         raise SystemExit("contraction_type is missing/invalid for trials: "
@@ -90,7 +93,16 @@ def load(path, sheet):
 
 
 # ===== ANALYSIS =====
-def build_trials(df):
+def build_trials(df, source):
+    # 'source' in the workbook is the filename suffix: PC, SD, SD_cropped or
+    # SD_shortened. All SD variants belong to the same SD plot.
+    if source == "SD":
+        mask = df["source"].str.startswith("SD")
+    else:
+        mask = df["source"] == source
+    df = df[mask].copy()
+    if df.empty:
+        raise SystemExit(f"No rows with source == '{source}'.")
     # chronological rank of each weak contraction within (trial, channel)
     weak = df[df["contraction_type"] == "weak"].copy()
     weak["weak_rank"] = (weak.groupby(["trial_id", "channel"])["window_start_s"]
@@ -137,7 +149,7 @@ def snr_db(values, noise):
 
 
 # ===== PLOT =====
-def plot_snr(trials, ctype, ylim_left, ylim_right, log_scale, out_stem):
+def plot_snr(trials, ctype, ylim_left, ylim_right, log_scale, out_stem, source):
     x = np.arange(1, len(trials) + 1)
     fig, ax1 = plt.subplots(figsize=(12, 7.5))
 
@@ -150,17 +162,17 @@ def plot_snr(trials, ctype, ylim_left, ylim_right, log_scale, out_stem):
                                 alpha=0.7, linewidth=1.2, zorder=2))
         ax1.scatter(xi, mean, marker="D", s=70, facecolor="royalblue",
                     edgecolor="black", zorder=4)
-        # label the mean value ABOVE the diamond (clears the box)
+        # label the mean value below the diamond (clears the box)
         ax1.annotate(f"{mean:.1f}", (xi, mean), textcoords="offset points",
-                     xytext=(0, -25), ha="center", va="bottom", fontsize=9,
+                     xytext=(0, -25), ha="center", va="top", fontsize=18,
                      color="royalblue", fontweight="bold")
         # one noise value per trial (same for strong and weak)
         ax1.hlines(t["noise"], xi - NOISE_HALF_WIDTH, xi + NOISE_HALF_WIDTH,
                    colors="dimgray", linewidths=3, zorder=4)
         # label the noise value BELOW the noise line (clears the box)
         ax1.annotate(f"{t['noise']:.2f}", (xi, t["noise"]),
-                     textcoords="offset points", xytext=(0, 10), ha="center",
-                     va="top", fontsize=9, color="dimgray")
+                     textcoords="offset points", xytext=(0, -15), ha="center",
+                     va="center", fontsize=18, color="dimgray")
 
     ax1.set_yscale("log" if log_scale else "linear")
     ax1.set_ylim(*ylim_left)
@@ -168,11 +180,12 @@ def plot_snr(trials, ctype, ylim_left, ylim_right, log_scale, out_stem):
     if log_scale:
         ax1.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
         ax1.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
-    ax1.set_ylabel("EMG envelope amplitude (µV)", fontsize=12)
+    ax1.set_ylabel("EMG envelope amplitude (µV)", fontsize=18)
+    ax1.tick_params(axis="both", labelsize=14)
     ax1.set_xticks(x)
     ax1.set_xticklabels([f"{t['subject']}\n{t['date']}\n{t['connection']}, gain {t['gain']}\n{t['channel']}"
-                         for t in trials], fontsize=9)
-    ax1.set_xlabel("Trial (subject, date, connection, PGA gain, selected channel)", fontsize=12)
+                         for t in trials], fontsize=14)
+    ax1.set_xlabel("Trial (subject, date, connection, PGA gain, selected channel)", fontsize=18)
     ax1.grid(True, axis="y", linestyle="--", alpha=0.5, which="major")
 
     # SNR dots on the right axis (mean signal / trial noise floor),
@@ -184,27 +197,28 @@ def plot_snr(trials, ctype, ylim_left, ylim_right, log_scale, out_stem):
     # label each SNR value ABOVE its dot (clears the dot and axis)
     for xi, s in zip(x, snrs):
         ax2.annotate(f"{s:.1f}", (xi, s), textcoords="offset points",
-                     xytext=(0, 10), ha="center", va="bottom", fontsize=9,
+                     xytext=(15, -3), fontsize=18, ha="left", va="center",
                      color="crimson", fontweight="bold")
     ax2.set_ylim(*ylim_right)
-    ax2.set_ylabel("SNR (dB)", color="crimson", fontsize=12)
-    ax2.tick_params(axis="y", labelcolor="crimson")
+    ax2.set_ylabel("SNR (dB)", color="crimson", fontsize=18)
+    ax2.tick_params(axis="y", labelcolor="crimson", labelsize=14)
 
     handles = [
-        Patch(facecolor="lightblue", edgecolor="black", alpha=0.7, label="Signal range (min–max)"),
+        Patch(facecolor="lightblue", edgecolor="black", alpha=0.7, label="Signal range"),
         Line2D([0], [0], marker="D", color="w", markerfacecolor="royalblue",
                markeredgecolor="black", markersize=8, label="Mean signal"),
     ]
     handles += [
-        Line2D([0], [0], color="dimgray", linewidth=3, label=f"Baseline noise ({args.noise_stat} of weak rests 2–4)"),
+        Line2D([0], [0], color="dimgray", linewidth=3, label=f"Baseline noise"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="crimson",
-               markeredgecolor="black", markersize=10, label="SNR = 20·log10(mean signal / noise)"),
+               markeredgecolor="black", markersize=10, label="SNR"),
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=9, frameon=False)
+    fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=18, frameon=False)
     ax1.set_title(f"{ctype.capitalize()} contractions: signal range, baseline noise and SNR "
-                  f"(n = {', '.join(str(len(t[ctype])) for t in trials)} per trial)",
-                  fontsize=14, pad=14)
-    fig.tight_layout(rect=[0, 0.09, 1, 1])
+                  f"(n = {', '.join(str(len(t[ctype])) for t in trials)} per trial)\n"
+                  f"{source} recording",
+                  fontsize=18, pad=14)
+    fig.tight_layout(rect=[0, 0.15, 1, 1])
     for ext in ("png", "pdf"):
         fig.savefig(f"{out_stem}.{ext}", dpi=300)
     return fig
@@ -215,55 +229,66 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = load(args.ods, args.sheet)
-    trials, ch = build_trials(df)
-    if len(trials) != 6:
-        print(f"Warning: expected 6 PC trials, found {len(trials)}.")
 
-    # ---- console summary + CSV of exactly what is plotted ----
-    rows = []
-    print(f"{'trial':34s} {'ch':5s} {'noise µV':>9s} {'(sd, n)':>13s} {'excl. rest':>10s}"
-          f" {'S mean':>8s} {'W mean':>8s} {'S dB':>6s} {'W dB':>6s}")
-    for t in trials:
-        r = ch.loc[(t["trial_id"], t["channel"])]
-        s_db, w_db = snr_db(t["strong"], t["noise"]), snr_db(t["weak"], t["noise"])
-        print(f"{t['trial_id']:34s} {t['channel']:5s} {t['noise']:9.2f} "
-              f"({r['noise_sd']:5.2f}, {int(r['noise_n'])}) {r['excluded_rest_noise_uV']:10.2f}"
-              f" {t['strong'].mean():8.1f} {t['weak'].mean():8.1f} {s_db:6.1f} {w_db:6.1f}")
-        rows.append({
-            "trial_id": t["trial_id"], "subject": t["subject"], "date": t["date"],
-            "connection": t["connection"], "gain": t["gain"], "channel": t["channel"],
-            "mdf_hz": t["mdf_hz"],
-            "noise_uV": t["noise"], "noise_sd_uV": r["noise_sd"], "noise_n": int(r["noise_n"]),
-            "excluded_first_weak_rest_noise_uV": r["excluded_rest_noise_uV"],
-            "strong_n": len(t["strong"]), "strong_min_uV": t["strong"].min(),
-            "strong_mean_uV": t["strong"].mean(), "strong_max_uV": t["strong"].max(),
-            "strong_snr_db": s_db,
-            "weak_n": len(t["weak"]), "weak_min_uV": t["weak"].min(),
-            "weak_mean_uV": t["weak"].mean(), "weak_max_uV": t["weak"].max(),
-            "weak_snr_db": w_db,
-        })
-    pd.DataFrame(rows).to_csv(out_dir / "snr_plot_data.csv", index=False)
-
-    # ---- axis limits (shared by both plots unless --separate-ylim) ----
-    def limits(types):
-        vals = np.concatenate([t[c] for t in trials for c in types])
-        noise = np.array([t["noise"] for t in trials])
-        snrs = [snr_db(t[c], t["noise"]) for t in trials for c in types]
-        top_db = np.ceil(max(snrs) * 1.15 / 10) * 10
-        if args.linear:
-            left = (0, vals.max() * 1.1)
-        else:
-            left = (noise.min() * 0.5, vals.max() * 1.5)
-        return left, (0, top_db)
-
-    log_scale = not args.linear
+    sources = ["PC", "SD"] if args.source == "both" else [args.source]
+    all_rows = []
     figs = []
-    for ctype in ("strong", "weak"):
-        yl, yr = limits(("strong", "weak") if not args.separate_ylim else (ctype,))
-        figs.append(plot_snr(trials, ctype, yl, yr, log_scale,
-                             str(out_dir / f"snr_{ctype}")))
-    print(f"\nSaved: {out_dir / 'snr_strong.png'}, {out_dir / 'snr_weak.png'} (+ .pdf), "
-          f"{out_dir / 'snr_plot_data.csv'}")
+
+    for source in sources:
+        trials, ch = build_trials(df, source)
+        if len(trials) != 6:
+            print(f"Warning: expected 6 {source} trials, found {len(trials)}.")
+
+        # ---- console summary + CSV rows ----
+        rows = []
+        print(f"\n{'trial':34s} {'ch':5s} {'noise µV':>9s} {'(sd, n)':>13s} {'excl. rest':>10s}"
+              f" {'S mean':>8s} {'W mean':>8s} {'S dB':>6s} {'W dB':>6s}")
+        for t in trials:
+            r = ch.loc[(t["trial_id"], t["channel"])]
+            s_db, w_db = snr_db(t["strong"], t["noise"]), snr_db(t["weak"], t["noise"])
+            print(f"{t['trial_id']:34s} {t['channel']:5s} {t['noise']:9.2f} "
+                  f"({r['noise_sd']:5.2f}, {int(r['noise_n'])}) {r['excluded_rest_noise_uV']:10.2f}"
+                  f" {t['strong'].mean():8.1f} {t['weak'].mean():8.1f} {s_db:6.1f} {w_db:6.1f}")
+            rows.append({
+                "trial_id": t["trial_id"], "subject": t["subject"], "date": t["date"],
+                "connection": t["connection"], "gain": t["gain"], "channel": t["channel"],
+                "source": source,
+                "mdf_hz": t["mdf_hz"],
+                "noise_uV": t["noise"], "noise_sd_uV": r["noise_sd"], "noise_n": int(r["noise_n"]),
+                "excluded_first_weak_rest_noise_uV": r["excluded_rest_noise_uV"],
+                "strong_n": len(t["strong"]), "strong_min_uV": t["strong"].min(),
+                "strong_mean_uV": t["strong"].mean(), "strong_max_uV": t["strong"].max(),
+                "strong_snr_db": s_db,
+                "weak_n": len(t["weak"]), "weak_min_uV": t["weak"].min(),
+                "weak_mean_uV": t["weak"].mean(), "weak_max_uV": t["weak"].max(),
+                "weak_snr_db": w_db,
+            })
+        all_rows.extend(rows)
+
+        # ---- axis limits (shared by both plots unless --separate-ylim) ----
+        def limits(types):
+            vals = np.concatenate([t[c] for t in trials for c in types])
+            noise = np.array([t["noise"] for t in trials])
+            snrs = [snr_db(t[c], t["noise"]) for t in trials for c in types]
+            top_db = np.ceil(max(snrs) * 1.15 / 10) * 10
+            if args.linear:
+                left = (0, vals.max() * 1.1)
+            else:
+                left = (noise.min() * 0.5, vals.max() * 1.5)
+            return left, (0, top_db)
+
+        log_scale = not args.linear
+        for ctype in ("strong", "weak"):
+            yl, yr = limits(("strong", "weak") if not args.separate_ylim else (ctype,))
+            figs.append(plot_snr(trials, ctype, yl, yr, log_scale,
+                                 str(out_dir / f"snr_{ctype}_{source.lower()}"), source))
+
+    pd.DataFrame(all_rows).to_csv(out_dir / "snr_plot_data.csv", index=False)
+
+    print(f"\nSaved:")
+    for f in sorted(out_dir.glob("snr_*")):
+        print(f"  {f.name}")
+    print(f"  snr_plot_data.csv")
     if not args.no_show:
         plt.show()
 
