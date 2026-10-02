@@ -31,19 +31,39 @@ Pipeline
      with the pitch axis and explain >~0.8 of the variance.
    - Dynamic-accel PCA: PC1/PC2 should span the sagittal (forward+vertical)
      plane; a small PC3 fraction means the motion is mostly planar.
-5. Project, fix the arbitrary PCA sign (largest-magnitude peak positive),
+5. Signal Vector Magnitude (SVM), orientation-independent motion intensity:
+   - |omega| = sqrt(wx^2 + wy^2 + wz^2) from the angular rates.
+   - |a_dyn| = sqrt(ax^2 + ay^2 + az^2) from the dynamic (gravity-removed)
+     acceleration. No "-1 g" term is needed here: that ENMO convention
+     applies to the raw accel magnitude, but gravity is already removed
+     by the high-pass in step 3.
+   SVM complements the PCA: it says HOW MUCH total motion, the PCA says
+   WHICH plane it lives in. SVM cannot distinguish sagittal from frontal
+   motion on its own.
+6. Project, fix the arbitrary PCA sign (largest-magnitude peak positive),
    optionally plot and export the processed signals.
+7. Second figure: EMG linear envelope (ch1 by default, --channel) computed
+   with the SAME filter chain as emg_isometric.py (bandpass 20-400 Hz +
+   notch 48-52 Hz, rectify, low-pass, all zero-phase, gap-aware per
+   contiguous valid segment) above the dynamic-accel PC1 and the
+   angular-rate PC1 on one shared time axis, so muscle activity and
+   sagittal-plane motion can be compared on the same timeline.
 
 Usage
 -----
 python pca_sagittal_plane_isolation.py CAPTURE.csv
 python pca_sagittal_plane_isolation.py CAPTURE.csv --fit-start 10 --fit-end 60
 python pca_sagittal_plane_isolation.py CAPTURE.csv --no-plot --save-csv out.csv
+python pca_sagittal_plane_isolation.py CAPTURE.csv --channel 2 --save-results
 """
 
 import argparse
+import os
+import sys
 
 import numpy as np
+import pandas as pd
+from scipy import signal
 from scipy.signal import butter, filtfilt
 
 try:
@@ -169,6 +189,89 @@ def resample_uniform(sample, imu, emg_fs, imu_fs):
 
 
 # ---------------------------------------------------------------------------
+# EMG envelope (same filter chain as emg_isometric.py)
+# ---------------------------------------------------------------------------
+ADS1299_VREF = 4.5
+
+
+def compute_emg_envelope(path, channel, emg_fs, env_cutoff, gain):
+    """Linear EMG envelope with the emg_isometric.py filter chain:
+    4th-order zero-phase bandpass 20-400 Hz, 2nd-order zero-phase notch
+    48-52 Hz, rectify, 4th-order zero-phase low-pass at ``env_cutoff`` Hz.
+
+    Gaps in the sample-counter column are re-inserted as NaN and filtering
+    runs per contiguous valid segment (>= 64 samples), exactly like
+    emg_isometric.py. The envelope is converted to microvolts with
+    Vref = 4.5 V and the given PGA gain.
+
+    Returns (t_s, envelope_uv) over the FULL reconstructed timeline, with
+    t in absolute sample time (sample_idx / emg_fs) so it aligns with the
+    IMU traces (which are zero-order-held onto the same sample timeline).
+    """
+    if channel < 1:
+        raise SystemExit("--channel must be >= 1")
+    nyq = emg_fs / 2.0
+    if nyq <= 400.0:
+        raise SystemExit(f"EMG sample rate {emg_fs} Hz too low for a "
+                         f"400 Hz bandpass (Nyquist {nyq:g} Hz)")
+    if not 0.0 < env_cutoff < nyq:
+        raise SystemExit(f"Envelope cutoff {env_cutoff} Hz must be between "
+                         f"0 and Nyquist {nyq:g} Hz")
+
+    df = pd.read_csv(path)
+    cols = [c for c in df.columns
+            if isinstance(c, str) and c.lower().startswith("ch")
+            and c.lower()[2:].isdigit()]
+    if not cols:
+        raise SystemExit(f"No EMG channels (ch1, ch2, ...) found in {path}")
+    ch_col = next((c for c in cols if c.lower() == f"ch{channel}"), None)
+    if ch_col is None:
+        raise SystemExit(f"Channel ch{channel} not found; "
+                         f"available EMG columns: {cols}")
+
+    idx = df.iloc[:, 0].values.astype(np.int64)
+    x = df[ch_col].values.astype(float)
+
+    # Gap reconstruction on the sample-counter column (as emg_isometric.py).
+    full_start, full_end = idx[0], idx[-1]
+    n_full = full_end - full_start + 1
+    received = np.zeros(n_full, dtype=bool)
+    received[idx - full_start] = True
+    recon = np.full(n_full, np.nan)
+    recon[received] = x
+    n_missing = int((~received).sum())
+    print(f"EMG ch{channel}: {int(received.sum())} received, "
+          f"{n_missing} missing ({100.0 * n_missing / n_full:.2f}%)")
+
+    b_bp, a_bp = signal.butter(4, [20.0 / nyq, 400.0 / nyq], btype="bandpass")
+    b_no, a_no = signal.butter(2, [48.0 / nyq, 52.0 / nyq], btype="bandstop")
+    b_env, a_env = signal.butter(4, env_cutoff / nyq, btype="lowpass")
+    uv_per_code = ADS1299_VREF / gain / (2 ** 23) * 1e6
+    print(f"EMG envelope: bandpass 20-400 Hz + notch 48-52 Hz, rectify + "
+          f"{env_cutoff:g} Hz low-pass, gain {gain:g} "
+          f"({uv_per_code:.4f} µV/code)")
+
+    def valid_segments(mask, min_len=1):
+        d = np.diff(mask.astype(int))
+        starts = np.where(d == 1)[0] + 1
+        ends = np.where(d == -1)[0] + 1
+        if mask[0]:
+            starts = np.r_[0, starts]
+        if mask[-1]:
+            ends = np.r_[ends, len(mask)]
+        return [(s, e) for s, e in zip(starts, ends) if e - s >= min_len]
+
+    envelope = np.full(n_full, np.nan)
+    for (s, e) in valid_segments(received, min_len=64):
+        seg = signal.filtfilt(b_bp, a_bp, recon[s:e])
+        seg = signal.filtfilt(b_no, a_no, seg)
+        envelope[s:e] = signal.filtfilt(b_env, a_env, np.abs(seg))
+
+    t = np.arange(full_start, full_end + 1) / emg_fs
+    return t, envelope * uv_per_code
+
+
+# ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
 def analyze(t, imu, args):
@@ -196,6 +299,15 @@ def analyze(t, imu, args):
     rate = np.column_stack([
         np.gradient(unwrap_deg(a), dt) for a in (roll_f, pitch_f, yaw_f)
     ])
+
+    # Signal Vector Magnitude (SVM): orientation-independent motion intensity.
+    # |a_dyn| needs no "-1 g" correction because gravity was already removed
+    # by the high-pass (the -1 g ENMO form applies to raw accel magnitude).
+    # NOTE: |omega| here is the magnitude of the *Euler rates*, a proxy for
+    # the true body-frame |omega| (Euler rates mix axes with orientation);
+    # still a valid intensity/cadence measure.
+    rate_svm = np.linalg.norm(rate, axis=1)
+    acc_svm = np.linalg.norm(acc_dyn, axis=1)
 
     # PCA fit window (default: whole file). Use --fit-start/--fit-end to
     # exclude standing still / turns from the PCA fit.
@@ -243,6 +355,12 @@ def analyze(t, imu, args):
     print("(accel leads angular rate by ~90 deg in a sinusoidal sense, so a")
     print(" strong |corr| against either PC is expected; check the plot.)")
 
+    print(f"\nSVM (total motion intensity, orientation-independent):")
+    print(f"  |omega|: mean {rate_svm.mean():.1f} deg/s, "
+          f"max {rate_svm.max():.1f} deg/s")
+    print(f"  |a_dyn|: mean {acc_svm.mean():.3f} g, "
+          f"max {acc_svm.max():.3f} g")
+
     return {
         "t": t,
         "roll_f": roll_f, "pitch_f": pitch_f, "yaw_f": yaw_f,
@@ -251,6 +369,7 @@ def analyze(t, imu, args):
         "acc_dyn": acc_dyn,
         "acc_pc1": acc_pc1, "acc_pc2": acc_pc2, "acc_pc3": acc_pc3,
         "acc_axis1": acc_axis1, "acc_expl": acc_expl,
+        "rate_svm": rate_svm, "acc_svm": acc_svm,
         "fit": fit,
     }
 
@@ -264,23 +383,27 @@ def save_csv(path, res):
         "droll_dps", "dpitch_dps", "dyaw_dps", "rate_pc1_dps",
         "acc_dyn_x_g", "acc_dyn_y_g", "acc_dyn_z_g",
         "acc_pc1_g", "acc_pc2_g", "acc_pc3_g",
+        "rate_svm_dps", "acc_svm_g",
     ])
     data = np.column_stack([
         res["t"], res["roll_f"], res["pitch_f"], res["yaw_f"],
         res["rate"][:, 0], res["rate"][:, 1], res["rate"][:, 2], res["rate_pc1"],
         res["acc_dyn"][:, 0], res["acc_dyn"][:, 1], res["acc_dyn"][:, 2],
         res["acc_pc1"], res["acc_pc2"], res["acc_pc3"],
+        res["rate_svm"], res["acc_svm"],
     ])
     np.savetxt(path, data, delimiter=",", header=header, comments="")
     print(f"Saved processed signals to {path}")
 
 
-def plot(res, args):
+def make_pca_figure(res, args):
+    """Build the 5-subplot PCA figure. Returns the figure, or None if
+    matplotlib is unavailable."""
     if plt is None:
         print("matplotlib not available - skipping plot")
-        return
+        return None
     t = res["t"]
-    fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True,
+    fig, axes = plt.subplots(5, 1, figsize=(11, 11), sharex=True,
                              constrained_layout=True)
     fig.suptitle(f"Sagittal-plane isolation: {args.input}")
 
@@ -304,14 +427,57 @@ def plot(res, args):
         ax.plot(t, res["rate"][:, j], lw=0.5, alpha=0.5, label=f"d{name}")
     ax.plot(t, res["rate_pc1"], lw=1.2, color="k", label="rate PC1 (sagittal)")
     ax.set_ylabel("ang. rate (deg/s)")
-    ax.set_xlabel("time (s)")
     ax.legend(loc="upper right", fontsize=8, ncol=4)
 
-    if args.save_plot:
-        fig.savefig(args.save_plot, dpi=150)
-        print(f"Saved plot to {args.save_plot}")
-    if not args.no_plot:
-        plt.show()
+    ax = axes[3]
+    ax.plot(t, res["rate_svm"], lw=0.9, color="tab:blue",
+            label="|omega| (rate SVM)")
+    ax.set_ylabel("|omega| (deg/s)")
+    ax.legend(loc="upper right", fontsize=8)
+
+    ax = axes[4]
+    ax.plot(t, res["acc_svm"], lw=0.9, color="tab:green",
+            label="|a_dyn| (accel SVM)")
+    ax.set_ylabel("|a_dyn| (g)")
+    ax.set_xlabel("time (s)")
+    ax.legend(loc="upper right", fontsize=8)
+
+    return fig
+
+
+def make_combined_figure(res, emg_t, emg_env, t_imu0, args):
+    """Build the 3-subplot EMG/IMU figure: EMG envelope, dynamic-accel PC1,
+    angular-rate PC1 on one shared time axis. ``t_imu0`` shifts the IMU time
+    (zero-based at the first IMU row) into the EMG sample-time base."""
+    if plt is None:
+        return None
+    t_imu = res["t"] + t_imu0
+    fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True,
+                             constrained_layout=True)
+    fig.suptitle(f"EMG envelope vs sagittal-plane PCs: {args.input}")
+
+    ax = axes[0]
+    ax.plot(emg_t, emg_env, lw=0.8, color="tab:blue",
+            label=f"EMG ch{args.channel} envelope")
+    ax.set_ylabel("EMG envelope (µV)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    ax.plot(t_imu, res["acc_pc1"], lw=0.9, color="k", label="accel PC1")
+    ax.set_ylabel("dyn accel PC1 (g)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[2]
+    ax.plot(t_imu, res["rate_pc1"], lw=0.9, color="k",
+            label="rate PC1 (sagittal)")
+    ax.set_ylabel("ang. rate PC1 (deg/s)")
+    ax.set_xlabel("time (s)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -348,11 +514,40 @@ def parse_args(argv=None):
                    help="Optional path to save the plot as an image")
     p.add_argument("--no-plot", action="store_true",
                    help="Do not open an interactive plot window")
+    p.add_argument("--channel", type=int, default=1,
+                   help="1-based EMG channel used for the envelope in the "
+                        "combined EMG/IMU figure (default: 1)")
+    p.add_argument("--env-cutoff", type=float, default=6.0,
+                   help="Low-pass cutoff (Hz) for the EMG linear envelope, "
+                        "same default as emg_isometric.py (default: 6)")
+    p.add_argument("--gain", type=float, default=8.0,
+                   help="ADS1299 PGA gain used during recording, for "
+                        "converting the envelope to microvolts "
+                        "(Vref = 4.5 V; default 8, the live-capture default)")
+    p.add_argument("--save-results", action="store_true",
+                   help="Save BOTH figures and a terminal-output log file "
+                        "(<csv>_imu_analysis.log) into the CSV's folder, "
+                        "like emg_isometric.py --save-results")
     return p.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
+
+    # --save-results: tee all terminal output into a buffer (like
+    # emg_isometric.py); flushed to <csv>_imu_analysis.log at the end.
+    _log_buf = None
+    _log_ctx = None
+    if args.save_results:
+        import contextlib
+        import io
+        import shlex
+        _log_buf = io.StringIO()
+        _log_ctx = contextlib.redirect_stdout(_log_buf)
+        _log_ctx.__enter__()
+        _log_buf.write("# Command: python "
+                       + " ".join(shlex.quote(a) for a in sys.argv[1:]) + "\n\n")
+
     sample, imu = load_capture(args.input)
     print(f"Loaded {sample.size} IMU-bearing rows from {args.input}")
 
@@ -362,9 +557,45 @@ def main(argv=None):
           f"{t[-1]:.1f} s duration")
 
     res = analyze(t, imu, args)
+
+    # EMG envelope over the full CSV timeline (emg_isometric.py filter chain).
+    emg_t, emg_env = compute_emg_envelope(
+        args.input, args.channel, args.emg_fs, args.env_cutoff, args.gain)
+
+    # The IMU signals are zero-based at the first IMU row; shift them into
+    # the EMG sample-time base so both share one x axis.
+    t_imu0 = sample[0] / args.emg_fs
+
     if args.save_csv:
         save_csv(args.save_csv, res)
-    plot(res, args)
+
+    fig_pca = make_pca_figure(res, args)
+    fig_comb = make_combined_figure(res, emg_t, emg_env, t_imu0, args)
+
+    if args.save_plot and fig_pca is not None:
+        fig_pca.savefig(args.save_plot, dpi=150)
+        print(f"Saved plot to {args.save_plot}")
+
+    if args.save_results:
+        out_dir = os.path.dirname(os.path.abspath(args.input))
+        base = os.path.splitext(os.path.basename(args.input))[0]
+        png_pca = os.path.join(out_dir, base + "_sagittal_pca.png")
+        png_comb = os.path.join(out_dir, base + "_emg_imu.png")
+        log_path = os.path.join(out_dir, base + "_imu_analysis.log")
+        if fig_pca is not None:
+            fig_pca.savefig(png_pca, dpi=150)
+        if fig_comb is not None:
+            fig_comb.savefig(png_comb, dpi=150)
+        if _log_ctx is not None:
+            _log_ctx.__exit__(None, None, None)
+        with open(log_path, "w") as f:
+            f.write(_log_buf.getvalue())
+        print(f"Saved figures: {png_pca}")
+        print(f"               {png_comb}")
+        print(f"Log file: {log_path}")
+
+    if not args.no_plot:
+        plt.show()
 
 
 if __name__ == "__main__":
