@@ -55,9 +55,9 @@ def parse_args():
     p.add_argument("--imu-angle-ylim", nargs=2, type=float, default=(-180.0, 180.0),
                    metavar=("MIN", "MAX"),
                    help="Fixed Euler-angle axis limits in degrees")
-    p.add_argument("--imu-accel-ylim", nargs=2, type=float, default=(-20.0, 20.0),
+    p.add_argument("--imu-accel-ylim", nargs=2, type=float, default=(-2.0, 2.0),
                    metavar=("MIN", "MAX"),
-                   help="Fixed linear-acceleration axis limits in m/s^2")
+                   help="Fixed acceleration axis limits in g")
     p.add_argument("--imu-channels", type=int, default=8, help="Number of IMU data traces to plot")
     p.add_argument("--mode", choices=("both", "emg", "imu"), default="both",
                    help="What to display: both sensors, EMG only, or IMU only")

@@ -102,7 +102,11 @@ def parse_imu_packet(data):
     The driver sends two different BHI360 virtual-sensor payloads:
       sensor 37 (GAMERV): int16 x,y,z,w + uint16 accuracy = 10 bytes
       sensor  4 (ACC):    int16 x,y,z = 6 bytes
-    Quaternion components are Q14; corrected acceleration is 1/16 m/s^2/LSB.
+    Quaternion components are Q14 (1/16384 LSB). Corrected accelerometer
+    (sensor ID 4) is 1/4096 g/LSB per the Bosch BHY2-Sensor-API default
+    scaling table (get_sensor_default_scaling in examples/common/common.c).
+    NOTE: sensor ID 4 is the *corrected accelerometer*, which INCLUDES
+    gravity - it is not linear acceleration (that would be sensor ID 31).
 
     Returns a dict with ``sample_idx``, ``sensor_id``, ``kind`` and either
     ``quat``/``accuracy``/``euler`` (quaternion) or ``accel`` (acceleration),
@@ -143,11 +147,13 @@ def parse_imu_packet(data):
 
     if sensor_id == 4 and data_len == 6:
         accel_raw = struct.unpack("<3h", data_raw[:6])
+        # 1/4096 g/LSB (Bosch default scaling for corrected accelerometer).
+        # Includes gravity. Multiply by 9.80665 for m/s^2.
         return {
             "sample_idx": sample_idx,
             "sensor_id": sensor_id,
             "kind": "acceleration",
-            "accel": [value / 16.0 for value in accel_raw],
+            "accel": [value / 4096.0 for value in accel_raw],
         }
 
     return None

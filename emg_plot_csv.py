@@ -82,9 +82,9 @@ def parse_args():
     p.add_argument("--imu-angle-ylim", nargs=2, type=float, default=(-180.0, 180.0),
                    metavar=("MIN", "MAX"),
                    help="Fixed Euler-angle axis limits in degrees")
-    p.add_argument("--imu-accel-ylim", nargs=2, type=float, default=(-20.0, 20.0),
+    p.add_argument("--imu-accel-ylim", nargs=2, type=float, default=(-2.0, 2.0),
                    metavar=("MIN", "MAX"),
-                   help="Fixed linear-acceleration axis limits in m/s^2")
+                   help="Fixed acceleration axis limits in g")
     p.add_argument("--offset", type=float, default=0.0, help="Vertical offset between channels (0 = separate subplots)")
     p.add_argument("--bad-status", choices=["keep", "drop", "mark"], default="mark", help="How to handle bad status rows")
     p.add_argument("--unsigned-24bit", action="store_true", help="Interpret as unsigned 24-bit codes")

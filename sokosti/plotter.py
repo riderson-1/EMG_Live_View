@@ -107,7 +107,8 @@ class LivePlotter:
 
         self.imu_lines = []
         self.imu_range_labels = []
-        imu_labels = ["roll", "pitch", "yaw", "accel_x", "accel_y", "accel_z"]
+        imu_labels = ["roll (°)", "pitch (°)", "yaw (°)",
+                      "accel_x (g)", "accel_y (g)", "accel_z (g)"]
         for i, ax in enumerate(self.imu_axes):
             ln, = ax.plot([], [], lw=0.8, color="tab:orange")
             ax.set_ylabel(imu_labels[i])
