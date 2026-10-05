@@ -163,7 +163,10 @@ def load_capture(path):
 
 
 def normalize_accel_units(imu, mode):
-    """Convert legacy accel scaling to g if needed. Returns (imu, converted)."""
+    """Convert legacy accel scaling to g if needed.
+
+    Returns (imu, legacy, median_mag) so the caller can report the scale
+    in the markdown capture table."""
     mag = np.median(np.linalg.norm(imu[:, 3:6], axis=1))
     if mode == "auto":
         legacy = mag > 8.0  # real data is ~1 g; legacy 1 g reads as ~256
@@ -180,9 +183,7 @@ def normalize_accel_units(imu, mode):
         print("=" * 74)
         imu = imu.copy()
         imu[:, 3:6] *= LEGACY_TO_G
-    else:
-        print(f"Accelerometer scale: treating as g (median |accel| = {mag:.3f} g)")
-    return imu, legacy
+    return imu, legacy, mag
 
 
 def resample_uniform(sample, imu, emg_fs, imu_fs):
@@ -248,16 +249,47 @@ def compute_emg_envelope(path, channel, emg_fs, env_cutoff, gain):
     recon = np.full(n_full, np.nan)
     recon[received] = x
     n_missing = int((~received).sum())
-    print(f"EMG ch{channel}: {int(received.sum())} received, "
-          f"{n_missing} missing ({100.0 * n_missing / n_full:.2f}%)")
+
+    # Gap statistics, same content as emg_isometric.py, markdown format.
+    d_idx = np.diff(idx)
+    gap_positions = np.where(d_idx != 1)[0]
+    gap_lengths = [int(d_idx[g] - 1) for g in gap_positions]
+    print("\n## EMG sample loss\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| File | `{path}` |")
+    print(f"| Channel | ch{channel} |")
+    print(f"| Samples received | {int(received.sum())} |")
+    print(f"| Samples missing | {n_missing} ({100.0 * n_missing / n_full:.2f}%) |")
+    print(f"| Number of gaps | {len(gap_lengths)} |")
+    if gap_lengths:
+        gl = np.array(gap_lengths, dtype=float)
+        print(f"| Gap length mean (samples) | {gl.mean():.1f} +/- {gl.std():.1f} (SD) |")
+        print(f"| Gap length median (samples) | {np.median(gl):.0f} |")
+        print(f"| Gap length min (samples) | {gl.min():.0f} |")
+        print(f"| Gap length max (samples) | {gl.max():.0f} |")
+        print(f"| Gap length mean (ms @{emg_fs:g} Hz) | "
+              f"{gl.mean() / emg_fs * 1000:.1f} +/- {gl.std() / emg_fs * 1000:.1f} (SD) |")
+        print(f"| Gap length max (ms @{emg_fs:g} Hz) | {gl.max() / emg_fs * 1000:.0f} |")
+        print("\n### Gap details\n")
+        print("| Start index | Length (samples) | Length (ms) |")
+        print("|-------------|------------------|-------------|")
+        for g, length in zip(gap_positions, gap_lengths):
+            start_idx = int(idx[g])
+            print(f"| {start_idx} | {length} | {length / emg_fs * 1000:.0f} |")
 
     b_bp, a_bp = signal.butter(4, [20.0 / nyq, 400.0 / nyq], btype="bandpass")
     b_no, a_no = signal.butter(2, [48.0 / nyq, 52.0 / nyq], btype="bandstop")
     b_env, a_env = signal.butter(4, env_cutoff / nyq, btype="lowpass")
     uv_per_code = ADS1299_VREF / gain / (2 ** 23) * 1e6
-    print(f"EMG envelope: bandpass 20-400 Hz + notch 48-52 Hz, rectify + "
-          f"{env_cutoff:g} Hz low-pass, gain {gain:g} "
-          f"({uv_per_code:.4f} µV/code)")
+    print("\n## EMG envelope filters\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print("| Bandpass | 20-400 Hz, 4th order, zero-phase |")
+    print("| Notch | 48-52 Hz, 2nd order, zero-phase |")
+    print(f"| Envelope low-pass | {env_cutoff:g} Hz, 4th order, zero-phase |")
+    print(f"| PGA gain | {gain:g} |")
+    print(f"| Scale | {uv_per_code:.4f} µV/code |")
 
     def valid_segments(mask, min_len=1):
         d = np.diff(mask.astype(int))
@@ -293,9 +325,13 @@ def analyze(t, imu, args):
 
     # Gravity estimate (before high-pass): should be ~1 g for a static-ish sensor.
     g_vec = imu[:, 3:6].mean(axis=0)
-    print(f"Gravity estimate (mean accel): "
-          f"[{g_vec[0]:+.3f}, {g_vec[1]:+.3f}, {g_vec[2]:+.3f}] g, "
-          f"|g| = {np.linalg.norm(g_vec):.3f} g")
+    print("\n## Gravity estimate (mean accel)\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| accel_x | {g_vec[0]:+.3f} g |")
+    print(f"| accel_y | {g_vec[1]:+.3f} g |")
+    print(f"| accel_z | {g_vec[2]:+.3f} g |")
+    print(f"| \\|g\\| | {np.linalg.norm(g_vec):.3f} g |")
 
     # Dynamic acceleration: high-pass removes gravity + DC offset.
     acc_dyn = np.column_stack([
@@ -343,31 +379,44 @@ def analyze(t, imu, args):
     corr1 = np.corrcoef(rate_pc1, acc_pc1)[0, 1]
     corr2 = np.corrcoef(rate_pc1, acc_pc2)[0, 1]
 
-    print(f"\nAngular-rate PCA (fit window {fit.sum()} samples, "
-          f"{t[fit][-1] - t[fit][0]:.1f} s):")
-    print(f"  explained variance: {np.round(rate_expl, 3)}")
-    print(f"  PC1 axis: {np.round(rate_axis, 3)} -> dominant Euler axis: "
-          f"{ANGLE_NAMES[dom_rate]}")
-    print(f"  (sagittal-dominant walking: PC1 ~ pitch(y), explained[0] > ~0.8)")
+    print("\n## Angular-rate PCA\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| Fit window (samples) | {fit.sum()} |")
+    print(f"| Fit window (s) | {t[fit][-1] - t[fit][0]:.1f} |")
+    for k in range(3):
+        print(f"| Explained variance PC{k + 1} | {rate_expl[k]:.3f} |")
+    for k, name in enumerate(("roll", "pitch", "yaw")):
+        print(f"| PC1 axis ({name}) | {rate_axis[k]:+.3f} |")
+    print(f"| Dominant Euler axis | {ANGLE_NAMES[dom_rate]} |")
+    print("(Sagittal-dominant walking: PC1 ~ pitch(y), explained PC1 > ~0.8.)")
 
-    print(f"\nDynamic-accel PCA:")
-    print(f"  explained variance: {np.round(acc_expl, 3)}")
-    print(f"  PC1 axis: {np.round(acc_axis1, 3)}")
-    print(f"  PC1+PC2 span the dominant movement plane "
-          f"({acc_expl[0] + acc_expl[1]:.1%} of variance);")
-    print(f"  a small PC3 fraction ({acc_expl[2]:.1%}) means mostly planar "
-          f"(sagittal) motion.")
+    print("\n## Dynamic-accel PCA\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    for k in range(3):
+        print(f"| Explained variance PC{k + 1} | {acc_expl[k]:.3f} |")
+    for k, name in enumerate(("x", "y", "z")):
+        print(f"| PC1 axis (a{name}) | {acc_axis1[k]:+.3f} |")
+    print(f"| PC1+PC2 plane span | {acc_expl[0] + acc_expl[1]:.1%} |")
+    print(f"| PC3 fraction | {acc_expl[2]:.1%} |")
+    print("(A small PC3 fraction means mostly planar (sagittal) motion.)")
 
-    print(f"\nCorrelation of rate-PC1 with accel-PC1: {corr1:+.3f}, "
-          f"with accel-PC2: {corr2:+.3f}")
-    print("(accel leads angular rate by ~90 deg in a sinusoidal sense, so a")
+    print("\n## Rate-PC1 vs accel-PC correlation\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| rate-PC1 vs accel-PC1 | {corr1:+.3f} |")
+    print(f"| rate-PC1 vs accel-PC2 | {corr2:+.3f} |")
+    print("(Accel leads angular rate by ~90 deg in a sinusoidal sense, so a")
     print(" strong |corr| against either PC is expected; check the plot.)")
 
-    print(f"\nSVM (total motion intensity, orientation-independent):")
-    print(f"  |omega|: mean {rate_svm.mean():.1f} deg/s, "
-          f"max {rate_svm.max():.1f} deg/s")
-    print(f"  |a_dyn|: mean {acc_svm.mean():.3f} g, "
-          f"max {acc_svm.max():.3f} g")
+    print("\n## Signal Vector Magnitude (SVM)\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| \\|omega\\| mean | {rate_svm.mean():.1f} deg/s |")
+    print(f"| \\|omega\\| max | {rate_svm.max():.1f} deg/s |")
+    print(f"| \\|a_dyn\\| mean | {acc_svm.mean():.3f} g |")
+    print(f"| \\|a_dyn\\| max | {acc_svm.max():.3f} g |")
 
     return {
         "t": t,
@@ -518,12 +567,22 @@ def make_gait_cycle_figure(res, emg_t, emg_env, t_imu0, heel_strikes, args):
     durs = np.array([b - a for a, b in cycles])
     if (durs <= 0).any():
         raise SystemExit("--heel-strikes contains duplicate/non-increasing times")
-    print(f"\nGait cycles: {len(cycles)} from {len(heel_strikes)} heel strikes")
-    print("  cycles: " + ", ".join(f"{a:.2f}-{b:.2f}" for a, b in cycles))
-    print(f"  duration (s): mean {durs.mean():.3f}, "
-          f"sd {durs.std(ddof=1) if len(durs) > 1 else 0.0:.3f}, "
-          f"min {durs.min():.3f}, max {durs.max():.3f}")
-    print(f"  mean cadence: {60.0 * len(cycles) / durs.sum():.1f} cycles/min")
+    dur_sd = durs.std(ddof=1) if len(durs) > 1 else 0.0
+    print("\n## Gait cycles\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| Heel strikes | {len(heel_strikes)} |")
+    print(f"| Gait cycles | {len(cycles)} |")
+    print(f"| Duration mean | {durs.mean():.3f} s |")
+    print(f"| Duration SD | {dur_sd:.3f} s |")
+    print(f"| Duration min | {durs.min():.3f} s |")
+    print(f"| Duration max | {durs.max():.3f} s |")
+    print(f"| Mean cadence | {60.0 * len(cycles) / durs.sum():.1f} cycles/min |")
+    print("\n### Cycle details\n")
+    print("| Cycle | Start (s) | End (s) | Duration (s) |")
+    print("|-------|-----------|---------|--------------|")
+    for k, (a, b) in enumerate(cycles, 1):
+        print(f"| {k} | {a:.2f} | {b:.2f} | {b - a:.3f} |")
 
     t_lo = min(emg_t[0], t_imu[0])
     t_hi = max(emg_t[-1], t_imu[-1])
@@ -662,12 +721,21 @@ def main(argv=None):
                        + " ".join(shlex.quote(a) for a in sys.argv[1:]) + "\n\n")
 
     sample, imu = load_capture(args.input)
-    print(f"Loaded {sample.size} IMU-bearing rows from {args.input}")
-
-    imu, _ = normalize_accel_units(imu, args.accel_unit)
+    imu, legacy, accel_mag = normalize_accel_units(imu, args.accel_unit)
     t, imu = resample_uniform(sample, imu, args.emg_fs, args.imu_fs)
-    print(f"Resampled to {args.imu_fs} Hz, {t.size} samples, "
-          f"{t[-1]:.1f} s duration")
+
+    print("\n## Capture\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print(f"| File | `{args.input}` |")
+    print(f"| IMU-bearing rows | {sample.size} |")
+    scale_txt = ("legacy -> converted to g (x 1/256)" if legacy
+                 else "g (already correct)")
+    print(f"| Accelerometer scale | {scale_txt} |")
+    print(f"| Median \\|accel\\| | {accel_mag:.3f} |")
+    print(f"| Resampled IMU rate | {args.imu_fs:g} Hz |")
+    print(f"| Resampled samples | {t.size} |")
+    print(f"| Duration | {t[-1]:.1f} s |")
 
     res = analyze(t, imu, args)
 
@@ -693,7 +761,7 @@ def main(argv=None):
 
     if args.save_plot and fig_pca is not None:
         fig_pca.savefig(args.save_plot, dpi=150)
-        print(f"Saved plot to {args.save_plot}")
+        print(f"Saved plot to `{args.save_plot}`")
 
     if args.save_results:
         out_dir = os.path.dirname(os.path.abspath(args.input))
@@ -712,11 +780,14 @@ def main(argv=None):
             _log_ctx.__exit__(None, None, None)
         with open(log_path, "w") as f:
             f.write(_log_buf.getvalue())
-        print(f"Saved figures: {png_pca}")
-        print(f"               {png_comb}")
+        print("\n## Saved output\n")
+        print("| File | Path |")
+        print("|------|------|")
+        print(f"| PCA figure | `{png_pca}` |")
+        print(f"| EMG/IMU figure | `{png_comb}` |")
         if fig_gait is not None:
-            print(f"               {png_gait}")
-        print(f"Log file: {log_path}")
+            print(f"| Gait-cycle figure | `{png_gait}` |")
+        print(f"| Log file | `{log_path}` |")
 
     if not args.no_plot:
         plt.show()
