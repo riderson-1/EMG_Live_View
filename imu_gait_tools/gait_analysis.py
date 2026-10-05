@@ -48,6 +48,13 @@ Pipeline
    contiguous valid segment) above the dynamic-accel PC1 and the
    angular-rate PC1 on one shared time axis, so muscle activity and
    sagittal-plane motion can be compared on the same timeline.
+8. Third figure (--heel-strikes "t1,t2,..."): gait-cycle-locked overlays.
+   Consecutive heel strikes bound one gait cycle (n strikes -> n-1 cycles;
+   the first and last strike mark the start and finish). Each cycle is
+   time-normalized to 0-100 percent (default) or kept in real seconds from
+   heel strike (--time-axis time). The EMG envelope, dynamic-accel PC1 and
+   angular-rate PC1 are overlaid as individual traces + mean + 90 % CI,
+   like the contraction overlays in emg_isometric.py.
 
 Usage
 -----
@@ -55,6 +62,7 @@ python pca_sagittal_plane_isolation.py CAPTURE.csv
 python pca_sagittal_plane_isolation.py CAPTURE.csv --fit-start 10 --fit-end 60
 python pca_sagittal_plane_isolation.py CAPTURE.csv --no-plot --save-csv out.csv
 python pca_sagittal_plane_isolation.py CAPTURE.csv --channel 2 --save-results
+python pca_sagittal_plane_isolation.py CAPTURE.csv --heel-strikes 10.5,12.3,14.1
 """
 
 import argparse
@@ -403,7 +411,7 @@ def make_pca_figure(res, args):
         print("matplotlib not available - skipping plot")
         return None
     t = res["t"]
-    fig, axes = plt.subplots(5, 1, figsize=(11, 11), sharex=True,
+    fig, axes = plt.subplots(5, 1, figsize=(22, 11), sharex=True,
                              constrained_layout=True)
     fig.suptitle(f"Sagittal-plane isolation: {args.input}")
 
@@ -452,7 +460,7 @@ def make_combined_figure(res, emg_t, emg_env, t_imu0, args):
     if plt is None:
         return None
     t_imu = res["t"] + t_imu0
-    fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True,
+    fig, axes = plt.subplots(3, 1, figsize=(22, 8), sharex=True,
                              constrained_layout=True)
     fig.suptitle(f"EMG envelope vs sagittal-plane PCs: {args.input}")
 
@@ -477,6 +485,102 @@ def make_combined_figure(res, emg_t, emg_env, t_imu0, args):
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
 
+    return fig
+
+
+def parse_heel_strikes(spec):
+    """Parse '10.5,12.3,14.1' into a sorted list of heel-strike times (s).
+    At least 2 times are required: they bound one gait cycle."""
+    try:
+        strikes = sorted(float(x) for x in spec.split(",") if x.strip())
+    except ValueError:
+        raise SystemExit(f"Could not parse --heel-strikes '{spec}' as a "
+                         f"comma-separated list of times in seconds")
+    if len(strikes) < 2:
+        raise SystemExit("--heel-strikes needs at least 2 times "
+                         "(start and end of one gait cycle)")
+    return strikes
+
+
+def make_gait_cycle_figure(res, emg_t, emg_env, t_imu0, heel_strikes, args):
+    """Build the 3-subplot gait-cycle overlay figure: EMG envelope,
+    dynamic-accel PC1 and angular-rate PC1, each overlaid across gait cycles
+    (individual traces + mean + 90 % CI, like the contraction overlays in
+    emg_isometric.py). Consecutive heel strikes bound one gait cycle, so
+    n strikes give n-1 cycles. Cycles are time-normalized to 0-100 percent
+    (default) or kept on a real-time axis from heel strike (--time-axis time;
+    the mean then stops at the shortest cycle, as in emg_isometric.py)."""
+    if plt is None:
+        return None
+    t_imu = res["t"] + t_imu0
+
+    cycles = list(zip(heel_strikes[:-1], heel_strikes[1:]))
+    durs = np.array([b - a for a, b in cycles])
+    if (durs <= 0).any():
+        raise SystemExit("--heel-strikes contains duplicate/non-increasing times")
+    print(f"\nGait cycles: {len(cycles)} from {len(heel_strikes)} heel strikes")
+    print("  cycles: " + ", ".join(f"{a:.2f}-{b:.2f}" for a, b in cycles))
+    print(f"  duration (s): mean {durs.mean():.3f}, "
+          f"sd {durs.std(ddof=1) if len(durs) > 1 else 0.0:.3f}, "
+          f"min {durs.min():.3f}, max {durs.max():.3f}")
+    print(f"  mean cadence: {60.0 * len(cycles) / durs.sum():.1f} cycles/min")
+
+    t_lo = min(emg_t[0], t_imu[0])
+    t_hi = max(emg_t[-1], t_imu[-1])
+    outside = [h for h in heel_strikes if h < t_lo or h > t_hi]
+    if outside:
+        print(f"WARNING: {len(outside)} heel strike(s) outside the data range "
+              f"[{t_lo:.1f}, {t_hi:.1f}] s: "
+              + ", ".join(f"{h:.2f}" for h in outside))
+
+    if args.time_axis == "percent":
+        grid = np.linspace(0.0, 100.0, 201)
+        x_label = "% of gait cycle (0 = heel strike)"
+    else:
+        grid = np.arange(0.0, durs.min(), 0.01)
+        x_label = "Time from heel strike (s)"
+
+    signals = [
+        (emg_t, emg_env, f"EMG ch{args.channel} envelope", "µV"),
+        (t_imu, res["acc_pc1"], "dyn accel PC1", "g"),
+        (t_imu, res["rate_pc1"], "ang. rate PC1", "deg/s"),
+    ]
+
+    fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True,
+                             constrained_layout=True)
+    fig.suptitle(f"Gait-cycle overlays ({len(cycles)} cycles): {args.input}")
+
+    for ax, (t_sig, y_sig, label, unit) in zip(axes, signals):
+        curves = []
+        for (a, b) in cycles:
+            if args.time_axis == "percent":
+                x_cycle = (t_sig - a) / (b - a) * 100.0
+            else:
+                x_cycle = t_sig - a
+            m = (~np.isnan(y_sig)) & (t_sig >= a) & (t_sig <= b)
+            if m.sum() < 10:
+                continue
+            curves.append(np.interp(grid, x_cycle[m], y_sig[m]))
+        if not curves:
+            ax.text(0.5, 0.5, "No valid cycles in this signal", ha="center",
+                    transform=ax.transAxes)
+            continue
+        curves = np.stack(curves)
+        n = curves.shape[0]
+        for k in range(n):
+            ax.plot(grid, curves[k], color="0.85", lw=0.7, ls="--", alpha=0.6,
+                    label="Individual" if k == 0 else None)
+        mean = curves.mean(axis=0)
+        if n > 1:
+            ci = 1.645 * curves.std(axis=0, ddof=1) / np.sqrt(n)
+            ax.fill_between(grid, mean - ci, mean + ci, color="0.35",
+                            alpha=0.35, lw=0, label="90% CI")
+        ax.plot(grid, mean, color="black", lw=2.0, label=f"Mean (n={n})")
+        ax.set_ylabel(f"{label} ({unit})")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel(x_label)
     return fig
 
 
@@ -524,8 +628,17 @@ def parse_args(argv=None):
                    help="ADS1299 PGA gain used during recording, for "
                         "converting the envelope to microvolts "
                         "(Vref = 4.5 V; default 8, the live-capture default)")
+    p.add_argument("--heel-strikes", default=None,
+                   help='Comma-separated heel-strike times in seconds, e.g. '
+                        '"10.5,12.3,14.1". Consecutive strikes bound one gait '
+                        'cycle (n strikes -> n-1 cycles) for the gait-cycle '
+                        'overlay figure')
+    p.add_argument("--time-axis", choices=("percent", "time"), default="percent",
+                   help="X axis of the gait-cycle overlays: normalize each "
+                        "cycle to 0-100 percent (default) or real seconds "
+                        "from heel strike")
     p.add_argument("--save-results", action="store_true",
-                   help="Save BOTH figures and a terminal-output log file "
+                   help="Save ALL figures and a terminal-output log file "
                         "(<csv>_imu_analysis.log) into the CSV's folder, "
                         "like emg_isometric.py --save-results")
     return p.parse_args(argv)
@@ -572,6 +685,12 @@ def main(argv=None):
     fig_pca = make_pca_figure(res, args)
     fig_comb = make_combined_figure(res, emg_t, emg_env, t_imu0, args)
 
+    fig_gait = None
+    if args.heel_strikes:
+        heel_strikes = parse_heel_strikes(args.heel_strikes)
+        fig_gait = make_gait_cycle_figure(res, emg_t, emg_env, t_imu0,
+                                          heel_strikes, args)
+
     if args.save_plot and fig_pca is not None:
         fig_pca.savefig(args.save_plot, dpi=150)
         print(f"Saved plot to {args.save_plot}")
@@ -581,17 +700,22 @@ def main(argv=None):
         base = os.path.splitext(os.path.basename(args.input))[0]
         png_pca = os.path.join(out_dir, base + "_sagittal_pca.png")
         png_comb = os.path.join(out_dir, base + "_emg_imu.png")
+        png_gait = os.path.join(out_dir, base + "_gait_cycles.png")
         log_path = os.path.join(out_dir, base + "_imu_analysis.log")
         if fig_pca is not None:
             fig_pca.savefig(png_pca, dpi=150)
         if fig_comb is not None:
             fig_comb.savefig(png_comb, dpi=150)
+        if fig_gait is not None:
+            fig_gait.savefig(png_gait, dpi=150)
         if _log_ctx is not None:
             _log_ctx.__exit__(None, None, None)
         with open(log_path, "w") as f:
             f.write(_log_buf.getvalue())
         print(f"Saved figures: {png_pca}")
         print(f"               {png_comb}")
+        if fig_gait is not None:
+            print(f"               {png_gait}")
         print(f"Log file: {log_path}")
 
     if not args.no_plot:
