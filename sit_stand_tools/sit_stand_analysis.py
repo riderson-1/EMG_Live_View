@@ -572,7 +572,7 @@ def write_trial_csvs(args, res, emg_t, emg_env, sample, legacy, accel_mag,
     with open(sig_path, "w") as f:
         f.write(header)
         f.write(col_header + "\n")
-        np.savetxt(f, data, delimiter=",", fmt="%.6g")
+        np.savetxt(f, data, delimiter=",", fmt="%.8g")
     print(f"Saved trial signals to {sig_path}")
 
     # ---- <stem>_emg.csv -------------------------------------------------
@@ -594,7 +594,7 @@ def write_trial_csvs(args, res, emg_t, emg_env, sample, legacy, accel_mag,
         f.write("\n".join(env_hdr) + "\n")
         f.write("t_s,emg_envelope_uV\n")
         np.savetxt(f, np.column_stack([emg_t, emg_env]),
-                   delimiter=",", fmt="%.6g")
+                   delimiter=",", fmt="%.8g")
     print(f"Saved trial EMG envelope to {env_path}")
 
 

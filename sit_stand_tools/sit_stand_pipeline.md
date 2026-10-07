@@ -18,6 +18,10 @@ Raw CSV recordings          sit_stand_analysis.py         rerun_sit_stand.sh    
                             + PNG figures                 transition times)
                             + <stem>_signals.csv
                             + <stem>_emg.csv
+                                                          plot_sit_stand_group.py
+                                                      --> group figure (gain-1 PC
+                                                          trials, 2x2 quadrants)
+                                                          + group_plot_data.csv
 ```
 
 | Stage | File | Location |
@@ -25,6 +29,7 @@ Raw CSV recordings          sit_stand_analysis.py         rerun_sit_stand.sh    
 | 1. Analysis | `sit_stand_analysis.py` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
 | 2. Batch runner | `rerun_sit_stand.sh` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
 | 3. Plotting | `plot_sit_stand_trials.py` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
+| 3b. Group plotting | `plot_sit_stand_group.py` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
 
 Data locations:
 
@@ -155,6 +160,55 @@ any `*Sit_Stand*` trial folder and reads **only the CSVs** (no log parsing).
 
 ---
 
+## Stage 3b: Group plotter — `plot_sit_stand_group.py`
+
+```
+.venv/bin/python plot_sit_stand_group.py
+```
+
+Reads the same per-trial CSVs as Stage 3 and produces **one group figure**
+(`sit_stand_group_overlays.png`) comparing the four **gain-1 PC**
+recordings — one trial per quadrant:
+
+| Quadrant | Trial |
+|----------|-------|
+| top-left | `BLE_1_Karl_Sit_Stand_2026-09-08_PC` |
+| top-right | `BLE_1_Max_Sit_Stand_2026-09-14_PC` |
+| bottom-left | `USB_1_Karl_Sit_Stand_2026-09-02_PC` |
+| bottom-right | `USB_1_Max_Sit_Stand_2026-09-02_PC` |
+
+Each quadrant has **4 stacked subplots** of cycle-locked overlays
+(0–100 % cycle, individual traces + mean + 90 % CI, same style as Stage 3):
+
+1. **xyz Euler angles** — roll / pitch / yaw from `_signals.csv`
+   (`roll_deg`, `pitch_deg`, `yaw_deg`), one colour per angle
+2. EMG ch1 envelope (µV)
+3. dynamic accel PC1 (g)
+4. angular-rate PC1 (deg/s)
+
+The gain filter reads the `# gain:` header comment of the `_emg.csv`
+(the trial-id rep digit is checked as well), so `--gain 8` would pick the
+BLE_8 trials instead. `--source SD` switches to the SD variants.
+
+Also writes `group_plot_data.csv` with exactly the plotted numbers — one
+row per trial × signal × cycle-% point: `trial_id, signal, cycle_pct, mean,
+ci_low, ci_high, n_cycles` (same schema as `sit_stand_plot_data.csv`, plus
+the three Euler-angle signals).
+
+### Decisions
+
+- **Reuses Stage 3 helpers** (`find_trials`, `load_trial`, `cycle_curves`,
+  the `imu_t0_s` shift, the 90 % CI convention) by importing them from
+  `plot_sit_stand_trials.py`, so both plotters stay consistent.
+- **One figure, not four**: the 2×2 quadrant layout keeps the four
+  subject × connection combinations side by side for direct comparison;
+  each quadrant is still a self-contained 4-subplot column.
+- **Euler angles instead of a 4th PCA signal**: the top subplot shows the
+  cycle-locked orientation (roll/pitch/yaw) because it has no PCA sign
+  ambiguity, unlike the PC1 signals.
+
+---
+
 ## Reproducing the whole pipeline
 
 ```bash
@@ -165,6 +219,9 @@ bash sit_stand_tools/rerun_sit_stand.sh
 
 # 2. plots (figures + sit_stand_plot_data.csv into sit_stand_tools/)
 .venv/bin/python sit_stand_tools/plot_sit_stand_trials.py
+
+# 2b. group figure (gain-1 PC trials, 2x2 quadrants + group_plot_data.csv)
+.venv/bin/python sit_stand_tools/plot_sit_stand_group.py
 ```
 
 Python environment: the workspace venv (`.venv/bin/python`, Python 3.12) has

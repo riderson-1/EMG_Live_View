@@ -67,6 +67,7 @@ python pca_sagittal_plane_isolation.py CAPTURE.csv --heel-strikes 10.5,12.3,14.1
 
 import argparse
 import os
+import shlex
 import sys
 
 import numpy as np
@@ -428,6 +429,8 @@ def analyze(t, imu, args):
         "acc_axis1": acc_axis1, "acc_expl": acc_expl,
         "rate_svm": rate_svm, "acc_svm": acc_svm,
         "fit": fit,
+        "gravity": g_vec, "dom_rate": dom_rate,
+        "corr1": corr1, "corr2": corr2,
     }
 
 
@@ -451,6 +454,148 @@ def save_csv(path, res):
     ])
     np.savetxt(path, data, delimiter=",", header=header, comments="")
     print(f"Saved processed signals to {path}")
+
+
+# ---------------------------------------------------------------------------
+# Per-trial pipeline CSVs (--save-trial-csv)
+# ---------------------------------------------------------------------------
+def _fmt(v):
+    """Format one header-comment value: floats with 6 significant digits."""
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    return str(v)
+
+
+def _command_line():
+    """The exact runnable command line (arguments quoted, like the logs)."""
+    return "python " + " ".join(shlex.quote(a) for a in sys.argv[1:])
+
+
+def write_trial_csvs(args, res, emg_t, emg_env, sample, legacy, accel_mag,
+                     heel_strikes):
+    """Write the two per-trial CSVs for the gait pipeline:
+
+    <stem>_signals.csv - 50 Hz IMU/PCA grid: filtered angles, angular rates,
+        rate PC1, dynamic accel, accel PC1/PC2/PC3, rate/accel SVM, with
+        '# key: value' header comments carrying the PCA statistics, SVM
+        statistics and the gait-cycle metadata.
+    <stem>_emg.csv - 1000 Hz EMG envelope (µV) with '# key: value' header
+        comments carrying the channel, gain, scale and filter settings.
+
+    Both files are written next to the capture CSV.
+    """
+    out_dir = os.path.dirname(os.path.abspath(args.input))
+    base = os.path.splitext(os.path.basename(args.input))[0]
+
+    # ---- <stem>_signals.csv --------------------------------------------
+    t = res["t"]
+    cycles = None
+    durs = None
+    if heel_strikes:
+        cycles = list(zip(heel_strikes[:-1], heel_strikes[1:]))
+        durs = np.array([b - a for a, b in cycles])
+
+    hdr = [
+        "# Gait trial signals (50 Hz IMU/PCA grid)",
+        f"# command: {_command_line()}",
+        f"# input: {args.input}",
+        f"# imu_fs_hz: {args.imu_fs:g}",
+        f"# emg_fs_hz: {args.emg_fs:g}",
+        f"# lp_fc_hz: {args.lp_fc:g}",
+        f"# hp_fc_hz: {args.hp_fc:g}",
+        f"# filter_order: {args.order}",
+        f"# accel_unit: {'legacy->g (x 1/256)' if legacy else 'g'}",
+        f"# median_abs_accel: {_fmt(accel_mag)}",
+        f"# imu_rows: {sample.size}",
+        f"# imu_t0_s: {_fmt(sample[0] / args.emg_fs)}",
+        f"# duration_s: {_fmt(t[-1])}",
+        f"# gravity_x_g: {_fmt(res['gravity'][0])}",
+        f"# gravity_y_g: {_fmt(res['gravity'][1])}",
+        f"# gravity_z_g: {_fmt(res['gravity'][2])}",
+        f"# fit_start_s: {_fmt(args.fit_start) if args.fit_start is not None else 'none'}",
+        f"# fit_end_s: {_fmt(args.fit_end) if args.fit_end is not None else 'none'}",
+        f"# fit_samples: {int(res['fit'].sum())}",
+        f"# rate_pca_explained_pc1: {_fmt(res['rate_expl'][0])}",
+        f"# rate_pca_explained_pc2: {_fmt(res['rate_expl'][1])}",
+        f"# rate_pca_explained_pc3: {_fmt(res['rate_expl'][2])}",
+        f"# rate_pc1_axis_roll: {_fmt(res['rate_axis'][0])}",
+        f"# rate_pc1_axis_pitch: {_fmt(res['rate_axis'][1])}",
+        f"# rate_pc1_axis_yaw: {_fmt(res['rate_axis'][2])}",
+        f"# rate_dominant_axis: {ANGLE_NAMES[res['dom_rate']]}",
+        f"# acc_pca_explained_pc1: {_fmt(res['acc_expl'][0])}",
+        f"# acc_pca_explained_pc2: {_fmt(res['acc_expl'][1])}",
+        f"# acc_pca_explained_pc3: {_fmt(res['acc_expl'][2])}",
+        f"# acc_pc1_axis_x: {_fmt(res['acc_axis1'][0])}",
+        f"# acc_pc1_axis_y: {_fmt(res['acc_axis1'][1])}",
+        f"# acc_pc1_axis_z: {_fmt(res['acc_axis1'][2])}",
+        f"# acc_pc12_plane_span: {_fmt(res['acc_expl'][0] + res['acc_expl'][1])}",
+        f"# rate_pc1_vs_acc_pc1_corr: {_fmt(res['corr1'])}",
+        f"# rate_pc1_vs_acc_pc2_corr: {_fmt(res['corr2'])}",
+        f"# rate_svm_mean_dps: {_fmt(res['rate_svm'].mean())}",
+        f"# rate_svm_max_dps: {_fmt(res['rate_svm'].max())}",
+        f"# acc_svm_mean_g: {_fmt(res['acc_svm'].mean())}",
+        f"# acc_svm_max_g: {_fmt(res['acc_svm'].max())}",
+    ]
+    if cycles is not None:
+        hdr.append(f"# heel_strikes_s: "
+                   + ",".join(f"{x:g}" for x in heel_strikes))
+        hdr.append(f"# n_cycles: {len(cycles)}")
+        hdr.append(f"# cycle_duration_mean_s: {_fmt(durs.mean())}")
+        hdr.append(f"# cycle_duration_sd_s: "
+                   + _fmt(durs.std(ddof=1) if len(durs) > 1 else 0.0))
+        hdr.append(f"# cycle_duration_min_s: {_fmt(durs.min())}")
+        hdr.append(f"# cycle_duration_max_s: {_fmt(durs.max())}")
+        hdr.append(f"# mean_cadence_cpm: "
+                   + _fmt(60.0 * len(cycles) / durs.sum()))
+        for k, (a, b) in enumerate(cycles, 1):
+            hdr.append(f"# cycle_{k}_start_s: {_fmt(a)}")
+            hdr.append(f"# cycle_{k}_end_s: {_fmt(b)}")
+            hdr.append(f"# cycle_{k}_duration_s: {_fmt(b - a)}")
+
+    header = "\n".join(hdr) + "\n"
+    data = np.column_stack([
+        t, res["roll_f"], res["pitch_f"], res["yaw_f"],
+        res["rate"][:, 0], res["rate"][:, 1], res["rate"][:, 2],
+        res["rate_pc1"],
+        res["acc_dyn"][:, 0], res["acc_dyn"][:, 1], res["acc_dyn"][:, 2],
+        res["acc_pc1"], res["acc_pc2"], res["acc_pc3"],
+        res["rate_svm"], res["acc_svm"],
+    ])
+    col_header = ",".join([
+        "t_s", "roll_deg", "pitch_deg", "yaw_deg",
+        "droll_dps", "dpitch_dps", "dyaw_dps", "rate_pc1_dps",
+        "acc_dyn_x_g", "acc_dyn_y_g", "acc_dyn_z_g",
+        "acc_pc1_g", "acc_pc2_g", "acc_pc3_g",
+        "rate_svm_dps", "acc_svm_g",
+    ])
+    sig_path = os.path.join(out_dir, base + "_signals.csv")
+    with open(sig_path, "w") as f:
+        f.write(header)
+        f.write(col_header + "\n")
+        np.savetxt(f, data, delimiter=",", fmt="%.8g")
+    print(f"Saved trial signals to {sig_path}")
+
+    # ---- <stem>_emg.csv -------------------------------------------------
+    uv_per_code = ADS1299_VREF / args.gain / (2 ** 23) * 1e6
+    env_hdr = [
+        "# Gait trial EMG envelope (1000 Hz EMG grid)",
+        f"# command: {_command_line()}",
+        f"# input: {args.input}",
+        f"# channel: ch{args.channel}",
+        f"# gain: {args.gain:g}",
+        f"# uv_per_code: {uv_per_code:.6g}",
+        f"# emg_fs_hz: {args.emg_fs:g}",
+        f"# bandpass: 20-400 Hz, 4th order, zero-phase",
+        f"# notch: 48-52 Hz, 2nd order, zero-phase",
+        f"# envelope_lowpass_hz: {args.env_cutoff:g}",
+    ]
+    env_path = os.path.join(out_dir, base + "_emg.csv")
+    with open(env_path, "w") as f:
+        f.write("\n".join(env_hdr) + "\n")
+        f.write("t_s,emg_envelope_uV\n")
+        np.savetxt(f, np.column_stack([emg_t, emg_env]),
+                   delimiter=",", fmt="%.8g")
+    print(f"Saved trial EMG envelope to {env_path}")
 
 
 def make_pca_figure(res, args):
@@ -700,6 +845,12 @@ def parse_args(argv=None):
                    help="Save ALL figures and a terminal-output log file "
                         "(<csv>_imu_analysis.log) into the CSV's folder, "
                         "like emg_isometric.py --save-results")
+    p.add_argument("--save-trial-csv", action="store_true",
+                   help="Write the per-trial pipeline CSVs next to the "
+                        "capture CSV: <stem>_signals.csv (50 Hz IMU/PCA grid "
+                        "with header-comment statistics) and <stem>_emg.csv "
+                        "(1000 Hz EMG envelope), consumed by "
+                        "plot_gait_trials.py / plot_gait_group.py")
     return p.parse_args(argv)
 
 
@@ -754,10 +905,15 @@ def main(argv=None):
     fig_comb = make_combined_figure(res, emg_t, emg_env, t_imu0, args)
 
     fig_gait = None
+    heel_strikes = None
     if args.heel_strikes:
         heel_strikes = parse_heel_strikes(args.heel_strikes)
         fig_gait = make_gait_cycle_figure(res, emg_t, emg_env, t_imu0,
                                           heel_strikes, args)
+
+    if args.save_trial_csv:
+        write_trial_csvs(args, res, emg_t, emg_env, sample, legacy,
+                         accel_mag, heel_strikes)
 
     if args.save_plot and fig_pca is not None:
         fig_pca.savefig(args.save_plot, dpi=150)
