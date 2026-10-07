@@ -15,7 +15,7 @@ The IMU sits on the lower leg. The script processes the capture in these steps:
    - **Angular-rate PCA** on `[d(roll)/dt, d(pitch)/dt, d(yaw)/dt]`: PC1 is the dominant rotation axis. For sagittal-dominant sit-to-stand motion, PC1 should align with the pitch axis and explain >~0.8 of the variance.
    - **Dynamic-accel PCA**: PC1/PC2 should span the sagittal (forward+vertical) plane; a small PC3 fraction means the motion is mostly planar.
 5. **SVM (Signal Vector Magnitude)** — orientation-independent motion intensity: `|omega|` from the angular rates and `|a_dyn|` from the dynamic acceleration. SVM says *how much* total motion there is; PCA says *which plane* it lives in.
-6. **Sign fix** — the PCA sign is arbitrary, so it is flipped so the largest-magnitude peak is positive.
+6. **Sign fix** — the PCA sign is arbitrary, so it is flipped so the largest-magnitude peak is positive. **Caveat:** the sign can resolve differently between recordings of the same session when the fit windows differ (e.g. BLE_8_Karl_Sit_Stand_2026-09-14 PC vs SD: rate-PC1 correlation −0.96, pure sign inversion — the data itself is identical). Check the EMG envelope (sign-free) when comparing PC/SD variants.
 7. **Figures** (see below).
 
 ### Legacy accelerometer disclaimer
@@ -78,6 +78,7 @@ python gait_analysis.py CAPTURE.csv --channel 2 --save-results --no-plot
 | `--accel-unit` | auto | `auto` / `g` / `legacy` accelerometer scaling |
 | `--fit-start`, `--fit-end` | none | PCA fit window in seconds |
 | `--save-csv` | none | Save processed signals to a CSV |
+| `--save-trial-csv` | off | Write the per-trial pipeline CSVs next to the capture CSV (see below) |
 | `--save-plot` | none | Save the PCA figure to an image |
 | `--no-plot` | off | Don't open an interactive plot window |
 | `--channel` | 1 | 1-based EMG channel for the envelope |
@@ -95,6 +96,25 @@ python gait_analysis.py CAPTURE.csv --channel 2 --save-results --no-plot
 | `<csv>_emg_imu.png` | EMG/IMU figure |
 | `<csv>_sit_to_stand_cycles.png` | Cycle overlay figure (only if `--transition-times` given) |
 | `<csv>_imu_analysis.log` | Full terminal output (markdown tables) |
+| `<csv>_signals.csv` | Per-trial pipeline CSV: 50 Hz IMU/PCA signals + `# key: value` header comments (PCA stats, SVM stats, cycle metadata) — with `--save-trial-csv` |
+| `<csv>_emg.csv` | Per-trial pipeline CSV: 1000 Hz EMG envelope (µV) + `# key: value` header comments (channel, gain, filters) — with `--save-trial-csv` |
+
+## Per-trial pipeline CSVs (`--save-trial-csv`)
+
+Two CSVs are written next to the capture CSV, consumed by
+`plot_sit_stand_trials.py` (see `sit_stand_pipeline.md`):
+
+- **`<stem>_signals.csv`** — one row per 50 Hz IMU sample, columns:
+  `t_s, roll_deg, pitch_deg, yaw_deg, droll_dps, dpitch_dps, dyaw_dps,
+  rate_pc1_dps, acc_dyn_x_g, acc_dyn_y_g, acc_dyn_z_g, acc_pc1_g, acc_pc2_g,
+  acc_pc3_g, rate_svm_dps, acc_svm_g`. The `# key: value` header comments
+  carry the command line, capture info, gravity estimate, PCA statistics
+  (explained variance, PC1 axes, correlations), SVM statistics, the
+  transition times and per-cycle start/end/duration, and `imu_t0_s` (the
+  IMU time offset in the EMG sample-time base, for aligning the two CSVs).
+- **`<stem>_emg.csv`** — one row per EMG sample (1000 Hz), columns:
+  `t_s, emg_envelope_uV`. Header comments carry the command line, channel,
+  gain, µV/code scale and the filter settings.
 
 The terminal output includes markdown tables: capture info, gravity estimate, EMG sample loss, EMG envelope filters, angular-rate PCA, dynamic-accel PCA, rate/accel correlations, SVM statistics, and sit-to-stand cycle durations.
 
