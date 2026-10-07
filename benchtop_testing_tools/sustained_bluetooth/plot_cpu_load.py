@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Plot per-thread CPU load over time from a Zephyr thread_analyzer log.
 
-Usage: python plot_cpu_load.py session_0013.log [--stacked] [--cumulative] [--min-peak 1] [--save out.png]
+Usage: python plot_cpu_load.py session_0013.log [--stacked] [--cumulative] [--min-peak 1]
+
+The figure is saved by default as a PNG in the same directory as the input log,
+named after the log file with any applicable options appended (e.g.
+session_0013_stacked_cumulative.png). Use --save to override the output path.
 """
 import argparse
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 
@@ -15,6 +20,18 @@ TS_RE = re.compile(r"\[(\d+):(\d{2}):(\d{2})\.(\d{3}),(\d{3})\]")
 LOGLINE_RE = re.compile(r"\[\d+:\d{2}:\d{2}\.\d{3},\d{3}\] <\w+> [^\r\n]*\r?\n")
 THREAD_RE = re.compile(r"^\s*(.+?)\s*: STACK: .*?CPU:\s*(\d+)\s*%", re.M)
 CYCLES_RE = re.compile(r"Total CPU cycles used:\s*(\d+)")
+
+# Map raw thread names (as parsed from the log) to human-readable legend labels.
+# Thread names in the log are the thread struct addresses (e.g. 0x200025c0);
+# see the address-to-thread mapping in the project docs.
+THREAD_LABELS = {
+    "0x200025c0": "SD thread",
+    "0x200026d8": "IMU thread",
+    "0x200027f0": "Log thread",
+    "0x20002908": "LED thread",
+    "0x20002a20": "BLE thread",
+    "0x20002b38": "Acquisition thread",
+}
 
 
 def ts_to_s(m):
@@ -86,7 +103,7 @@ def main():
                     help="hide threads whose peak CPU %% is below this (default 1)")
     ap.add_argument("--cumulative", action="store_true",
                     help="plot the analyzer's printed CPU %% (averaged since boot) instead of per-interval load")
-    ap.add_argument("--save", help="save figure to this file instead of showing it")
+    ap.add_argument("--save", help="save figure to this file instead of showing it (default: same name as input log, in its directory, with options appended and .png extension)")
     a = ap.parse_args()
 
     series, cycles = parse(a.log)
@@ -100,16 +117,19 @@ def main():
     shown = [n for n in names if max(c for _, c in series[n]) >= a.min_peak]
     hidden = [n for n in names if n not in shown]
 
+    def label(name):
+        return THREAD_LABELS.get(name, name)
+
     fig, ax = plt.subplots(figsize=(13, 6))
     if a.stacked:
         times = [t for t, _ in series[shown[0]]]
         ys = [[c for _, c in series[n]][:len(times)] for n in shown]
-        ax.stackplot(times, ys, labels=shown)
+        ax.stackplot(times, ys, labels=[label(n) for n in shown])
         ax.set_ylim(0, 100)
     else:
         for n in shown:
             ts, cs = zip(*series[n])
-            ax.plot(ts, cs, marker=".", ms=3, lw=1.2, label=n)
+            ax.plot(ts, cs, marker=".", ms=3, lw=1.2, label=label(n))
     ax.set_xlabel("time since boot [s]")
     ax.set_ylabel("CPU load [%]")
     ax.set_title("Per-thread CPU load (%s)" % ("as printed, avg since boot" if a.cumulative else "per analyzer interval"))
@@ -118,13 +138,21 @@ def main():
     fig.tight_layout()
 
     if hidden:
-        print("Hidden (peak < %.1f%%): %s" % (a.min_peak, ", ".join(hidden)))
-    print("Threads plotted:", ", ".join(shown))
-    if a.save:
-        fig.savefig(a.save, dpi=150)
-        print("Saved", a.save)
-    else:
-        plt.show()
+        print("Hidden (peak < %.1f%%): %s" % (a.min_peak, ", ".join(label(n) for n in hidden)))
+    print("Threads plotted:", ", ".join(label(n) for n in shown))
+
+    save_path = a.save
+    if not save_path:
+        log_path = Path(a.log)
+        parts = [log_path.stem]
+        if a.stacked:
+            parts.append("stacked")
+        if a.cumulative:
+            parts.append("cumulative")
+        save_path = str(log_path.parent / ("_".join(parts) + ".png"))
+
+    fig.savefig(save_path, dpi=150)
+    print("Saved", save_path)
 
 
 if __name__ == "__main__":
