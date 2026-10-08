@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+"""
+Plotting stage of the crosstalk analysis pipeline.
+Reads interim data from analyze.py and generates all figures and tables.
+
+Usage:
+    python3 plot.py
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# Paths
+OUTPUT_DIR = "/home/karl/repos/Sokosti_tools/benchtop_testing_tools/crosstalk_test/outputs"
+INTERIM_PATH = os.path.join(OUTPUT_DIR, "interim_data.npz")
+FIGURE_DIR = os.path.join(OUTPUT_DIR, "figures")
+TABLE_DIR = os.path.join(OUTPUT_DIR, "tables")
+
+# Constants
+FS = 1000
+N_CHANNELS = 16
+SINE_F0 = [10, 100]
+AMPLITUDES_MVPP = [2, 10]
+CHIP_OF = {ch: ("ads1299-1" if 1 <= ch <= 8 else "ads1299-2") for ch in range(1, 17)}
+
+plt.rcParams.update({
+    "font.size": 9, "axes.labelsize": 9, "axes.titlesize": 9,
+    "xtick.labelsize": 8, "ytick.labelsize": 8, "legend.fontsize": 7.5,
+    "figure.dpi": 150, "savefig.dpi": 300, "axes.linewidth": 0.8,
+})
+
+os.makedirs(FIGURE_DIR, exist_ok=True)
+os.makedirs(TABLE_DIR, exist_ok=True)
+
+
+def _fig_size(w, r=0.618):
+    return (w, w * r)
+
+
+def load_interim():
+    """Load interim data from analyze.py."""
+    d = np.load(INTERIM_PATH, allow_pickle=True)
+
+    n_conditions = len(d["matrices_n_f0"])
+    crosstalk = {}
+    for i in range(n_conditions):
+        f0 = int(d["matrices_n_f0"][i])
+        amp = int(d["matrices_n_amp"][i])
+        key = (f0, amp)
+        crosstalk[key] = {
+            "driven_amps_uV": {int(k): float(v) for k, v in d["matrices_driven_amps"][i].items()},
+            "detection_limits_db": {int(k): float(v) for k, v in d["matrices_detection_limits"][i].items()},
+            "xt_db": d["matrices_xt_db"][i].astype(float),
+            "xt_corrected": d["matrices_xt_corr"][i].astype(float),
+            "censored": d["matrices_censored"][i].astype(bool),
+        }
+
+    n_noise = len(d["noise_ch"])
+    noise_ref = {}
+    for i in range(n_noise):
+        ch = int(d["noise_ch"][i])
+        noise_ref[ch] = {
+            "fft_amps_uV": {10: float(d["noise_fft10"][i]), 100: float(d["noise_fft100"][i])},
+            "rms_bands_uV": {"0.5-100Hz": float(d["noise_rms_05_100"][i]),
+                             "20-450Hz": float(d["noise_rms_20_450"][i])},
+            "welch_freqs_hz": d["noise_welch_freqs"][i],
+            "welch_density_nv": d["noise_welch_density"][i],
+            "mean_uV": float(d["noise_mean_uV"][i]),
+            "rms_uV": float(d["noise_rms_uV"][i]),
+            "vpp_uV": float(d["noise_vpp_uV"][i]),
+        }
+
+    driven_psds = {}
+    for i, key_str in enumerate(d["psd_keys"]):
+        f0, amp, ch = key_str.split("_")
+        driven_psds[(int(f0), int(amp), int(ch))] = (d["psd_freqs"][i], d["psd_density_nv"][i])
+
+    baseline_info = d["baseline_info"].item()
+    if not isinstance(baseline_info, dict):
+        baseline_info = dict(baseline_info)
+
+    return crosstalk, noise_ref, baseline_info, driven_psds
+
+
+# ============================================================================
+# FIGURE FUNCTIONS
+# ============================================================================
+
+def plot_parameter_overview(crosstalk, baseline_duration_s, output_path):
+    fig, ax = plt.subplots(figsize=_fig_size(7.0))
+    ax.axis("off")
+    sys_rows = [
+        ["Parameter", "Value"],
+        ["Sampling rate fs", f"{FS} Hz"], ["PGA gain", "1G"],
+        ["Vref", "4.5 V"],
+        ["LSB formula", "LSB = 2*Vref / (gain * 2^24)"],
+        ["LSB value", f"{2.0*4.5/(1*2**24):.4e} V = {2.0*4.5/(1*2**24)*1e6:.4f} uV/count"],
+        ["Channel count", "16"],
+        ["Channel mapping", "ch 1-8 -> ads1299-1, ch 9-16 -> ads1299-2"],
+        ["Segment duration", "3.0 s"],
+        ["File format", "PC.csv (16 EMG channels + sample/status)"],
+        ["Baseline duration", f"{baseline_duration_s:.2f} s"],
+    ]
+    test_rows = [["Condition", "Files"]]
+    for (f0, amp) in sorted(crosstalk.keys()):
+        test_rows.append([f"16 driven channels, {f0} Hz, {amp} mVpp", "16"])
+    table_data = sys_rows + [["", ""]] + test_rows
+    table = ax.table(cellText=table_data, loc="upper left", cellLoc="left",
+                     colWidths=[0.35, 0.25, 0.2, 0.2])
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.5)
+    for j in range(len(table_data[0])):
+        table[0, j].set_facecolor("#4472C4")
+        table[0, j].set_text_props(color="white", fontweight="bold")
+    for j in range(len(table_data[0])):
+        table[1, j].set_facecolor("#D9E2F3")
+        table[1, j].set_text_props(fontweight="bold")
+    ax.set_title("System Parameters and Test Conditions", fontsize=10, fontweight="bold", pad=10)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+    # CSV export of the same table
+    csv_path = os.path.join(TABLE_DIR, "parameter_overview.csv")
+    with open(csv_path, "w") as f:
+        for row in table_data:
+            f.write(",".join(row) + "\n")
+    print(f"  Saved: {csv_path}")
+
+
+def plot_psd_overlay(noise_ref, driven_psds, output_path):
+    """PSD overlay per driven channel: driven channel (from crosstalk recording),
+    adjacent victim, far victim (both from the same recording), and the baseline
+    PSD of the driven channel for comparison. Log frequency axis."""
+    psd_channels = [1, 4, 8, 9, 13, 16]
+    f0_list = [10, 100]
+    amp = 10  # 10 mVpp condition
+
+    fig, axes = plt.subplots(2, 3, figsize=_fig_size(7.5, 0.75))
+    axes = axes.flatten()
+    for idx, driven_ch in enumerate(psd_channels):
+        ax = axes[idx]
+        for f0 in f0_list:
+            key = (f0, amp, driven_ch)
+            if key not in driven_psds:
+                continue
+            f_psd, dens = driven_psds[key]
+            color = "red" if f0 == 10 else "blue"
+            ax.plot(f_psd, dens, color=color, linewidth=0.8, label=f"Driven CH{driven_ch}, {f0} Hz")
+            ax.axvline(f0, color=color, linestyle="--", alpha=0.4, linewidth=0.7)
+        # Baseline PSD of the same channel for reference
+        if driven_ch in noise_ref:
+            nr = noise_ref[driven_ch]
+            ax.plot(nr["welch_freqs_hz"], nr["welch_density_nv"], color="gray",
+                    linewidth=0.8, alpha=0.8, label=f"Baseline CH{driven_ch}")
+        ax.set_xscale("log")
+        ax.set_xlim([0.5, 500])
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("PSD (nV$^2$/Hz)")
+        ax.set_title(f"CH{driven_ch} driven, {amp} mVpp", fontsize=8)
+        ax.legend(fontsize=5.5, loc="upper right")
+        ax.grid(alpha=0.3, which="both", linewidth=0.3)
+    plt.suptitle("PSD Overlay: Driven Channels (crosstalk recordings) vs Baseline",
+                 fontsize=10, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def plot_crosstalk_matrix(crosstalk, output_path):
+    conditions = [(10, 2), (10, 10), (100, 2), (100, 10)]
+    all_vals = []
+    for key in conditions:
+        if key in crosstalk:
+            vals = crosstalk[key]["xt_corrected"]
+            mask = ~crosstalk[key]["censored"]
+            all_vals.extend(vals[mask].flatten())
+    vmin = min(np.min(all_vals), -60) if all_vals else -60
+    vmax = max(np.max(all_vals), 0) if all_vals else 0
+
+    fig, axes = plt.subplots(2, 2, figsize=_fig_size(7.0, 0.85))
+    axes = axes.flatten()
+    for idx, (f0, amp) in enumerate(conditions):
+        ax = axes[idx]
+        if (f0, amp) not in crosstalk:
+            continue
+        res = crosstalk[(f0, amp)]
+        xt = res["xt_corrected"]
+        censored = res["censored"]
+        im = ax.imshow(xt, cmap="RdYlGn_r", vmin=vmin, vmax=vmax, aspect="auto")
+        diag = np.eye(16, dtype=bool)
+        ax.imshow(np.where(diag, 1, 0), cmap="gray", alpha=0.3, vmin=0, vmax=1, aspect="auto")
+        for i in range(16):
+            for j in range(16):
+                if censored[i, j]:
+                    ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1,
+                                               fill=False, edgecolor="black", hatch="//", linewidth=0.5))
+        for i in [0, 7, 15]:
+            for j in [0, 7, 15]:
+                if not censored[i, j] and np.isfinite(xt[i, j]):
+                    ax.text(j, i, f"{xt[i, j]:.1f}", ha="center", va="center", fontsize=6,
+                            color="black" if xt[i, j] > (vmin + vmax) / 2 else "white")
+        ax.set_xlabel("Victim channel")
+        ax.set_ylabel("Driven channel")
+        ax.set_title(f"{f0} Hz, {amp} mVpp – XT (dB, corrected)", fontsize=8)
+        ax.set_xticks(range(16))
+        ax.set_xticklabels([str(c) for c in range(1, 17)], fontsize=6)
+        ax.set_yticks(range(16))
+        ax.set_yticklabels([str(c) for c in range(1, 17)], fontsize=6)
+        dl = np.nanmedian(list(res["detection_limits_db"].values()))
+        if np.isfinite(dl):
+            ax.text(0.02, 0.98, f"DL (median): {dl:.1f} dB", transform=ax.transAxes, fontsize=7,
+                    verticalalignment="top", bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    plt.suptitle("Crosstalk Matrix (noise-corrected, hatched = censored)", fontsize=10, fontweight="bold")
+    if all_vals:
+        cbar = fig.colorbar(im, ax=axes, orientation="vertical", fraction=0.03, pad=0.04,
+                            location="right")
+        cbar.set_label("XT (dB)", fontsize=8)
+    plt.tight_layout(rect=[0, 0, 0.92, 1])
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def plot_crosstalk_vs_distance(crosstalk, output_path):
+    conditions = [(10, 2), (10, 10), (100, 2), (100, 10)]
+    fig, axes = plt.subplots(1, 2, figsize=_fig_size(7.0, 0.65))
+    for col, f0 in enumerate([10, 100]):
+        ax = axes[col]
+        for amp in AMPLITUDES_MVPP:
+            key = (f0, amp)
+            if key not in crosstalk:
+                continue
+            res = crosstalk[key]
+            xt = res["xt_corrected"]
+            censored = res["censored"]
+            xt_raw = res["xt_db"]
+            distances, xt_vals, is_censored, pair_types = [], [], [], []
+            for i in range(16):
+                for j in range(16):
+                    if i == j:
+                        continue
+                    d = abs((i + 1) - (j + 1))
+                    same_chip = CHIP_OF[i + 1] == CHIP_OF[j + 1]
+                    pt = "adjacent" if d == 1 else ("same-ADS" if same_chip else "other-ADS")
+                    if censored[i, j]:
+                        distances.append(d)
+                        xt_vals.append(xt_raw[i, j] if np.isfinite(xt_raw[i, j]) else np.nan)
+                        is_censored.append(True)
+                    else:
+                        distances.append(d)
+                        xt_vals.append(xt[i, j])
+                        is_censored.append(False)
+                    pair_types.append(pt)
+            markers = {"adjacent": "o", "same-ADS": "s", "other-ADS": "D"}
+            for pt in ["adjacent", "same-ADS", "other-ADS"]:
+                idx_pts = [k for k, t in enumerate(pair_types) if t == pt and not is_censored[k] and np.isfinite(xt_vals[k])]
+                if idx_pts:
+                    ax.scatter([distances[k] for k in idx_pts], [xt_vals[k] for k in idx_pts],
+                               marker=markers[pt], s=15, alpha=0.5, label=f"{amp} mVpp, {pt}")
+            idx_cens = [k for k, t in enumerate(pair_types) if t == "adjacent" and is_censored[k] and np.isfinite(xt_vals[k])]
+            if idx_cens:
+                ax.scatter([distances[k] for k in idx_cens], [xt_vals[k] for k in idx_cens],
+                           marker="o", s=20, facecolors="none", edgecolors="red", linewidths=0.8,
+                           label=f"{amp} mVpp, censored")
+            for d in range(1, 16):
+                vals = [xt_vals[k] for k in range(len(distances))
+                        if distances[k] == d and not is_censored[k] and np.isfinite(xt_vals[k])]
+                if vals:
+                    ax.scatter(d, np.mean(vals), marker="D", s=40, c="black", zorder=5)
+                    ax.scatter(d, np.max(vals), marker="v", s=40, c="black", zorder=5)
+            for a in AMPLITUDES_MVPP:
+                k2 = (f0, a)
+                if k2 in crosstalk:
+                    dl = np.nanmedian(list(crosstalk[k2]["detection_limits_db"].values()))
+                    if np.isfinite(dl):
+                        ax.axhline(dl, linestyle="--", alpha=0.5, label=f"DL ({a} mVpp): {dl:.1f} dB")
+        ax.set_xlabel("Channel distance")
+        ax.set_ylabel("Crosstalk (dB)")
+        ax.set_title(f"{f0} Hz", fontsize=9)
+        ax.set_xticks(range(1, 16))
+        ax.legend(fontsize=5.5, loc="lower left")
+    plt.suptitle("Crosstalk vs Channel Distance", fontsize=10, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def plot_freq_amp_dependence(crosstalk, output_path):
+    conditions = [(10, 2), (10, 10), (100, 2), (100, 10)]
+    cond_means = {}
+    for key in conditions:
+        if key not in crosstalk:
+            continue
+        res = crosstalk[key]
+        vals = res["xt_corrected"][~res["censored"]]
+        vals = vals[np.isfinite(vals)]
+        cond_means[key] = np.mean(vals) if len(vals) > 0 else np.nan
+
+    fig, axes = plt.subplots(1, 2, figsize=_fig_size(7.0, 0.6))
+
+    ax = axes[0]
+    x = np.arange(2)
+    width = 0.35
+    for k, amp in enumerate(AMPLITUDES_MVPP):
+        y = [cond_means.get((10, amp), np.nan), cond_means.get((100, amp), np.nan)]
+        bars = ax.bar(x + (k - 0.5) * width, y, width, label=f"{amp} mVpp")
+        for xi, yi in zip(x + (k - 0.5) * width, y):
+            if np.isfinite(yi):
+                ax.text(xi, yi, f"{yi:.1f}", ha="center", va="bottom" if yi < 0 else "top", fontsize=7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(["10 Hz", "100 Hz"])
+    ax.set_xlabel("Frequency")
+    ax.set_ylabel("Mean crosstalk (dB)")
+    ax.set_title("Frequency dependence", fontsize=9)
+    ax.legend(fontsize=7)
+    ax.axhline(0, color="gray", linewidth=0.5)
+
+    ax = axes[1]
+    for k, f0 in enumerate([10, 100]):
+        y = [cond_means.get((f0, 2), np.nan), cond_means.get((f0, 10), np.nan)]
+        bars = ax.bar(x + (k - 0.5) * width, y, width, label=f"{f0} Hz")
+        for xi, yi in zip(x + (k - 0.5) * width, y):
+            if np.isfinite(yi):
+                ax.text(xi, yi, f"{yi:.1f}", ha="center", va="bottom" if yi < 0 else "top", fontsize=7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(["2 mVpp", "10 mVpp"])
+    ax.set_xlabel("Amplitude")
+    ax.set_ylabel("Mean crosstalk (dB)")
+    ax.set_title("Amplitude dependence", fontsize=9)
+    ax.legend(fontsize=7)
+    ax.axhline(0, color="gray", linewidth=0.5)
+
+    plt.suptitle("Frequency and Amplitude Dependence", fontsize=10, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def export_summary_table(crosstalk, output_path):
+    conditions = [(10, 2), (10, 10), (100, 2), (100, 10)]
+    rows = []
+    for f0, amp in conditions:
+        key = (f0, amp)
+        if key not in crosstalk:
+            continue
+        res = crosstalk[key]
+        xt = res["xt_corrected"]
+        cens = res["censored"]
+        off_diag = ~np.eye(16, dtype=bool)
+        vals = xt[off_diag & ~cens]
+        vals = vals[np.isfinite(vals)]
+        if len(vals) == 0:
+            continue
+        worst_idx = np.unravel_index(np.nanargmax(np.where(off_diag, xt, np.nan)), xt.shape)
+        worst_pair = f"CH{worst_idx[0]+1}->CH{worst_idx[1]+1}"
+        n_censored = int((cens & off_diag).sum())
+        n_total = 16 * 15
+        adj_vals, non_adj_vals = [], []
+        for i in range(16):
+            for j in range(16):
+                if i == j or cens[i, j]:
+                    continue
+                d = abs((i + 1) - (j + 1))
+                if d == 1:
+                    adj_vals.append(xt[i, j])
+                else:
+                    non_adj_vals.append(xt[i, j])
+        rows.append({
+            "Freq (Hz)": f0, "Amplitude (mVpp)": amp, "Worst pair": worst_pair,
+            "Worst XT (dB)": round(float(vals.max()), 2), "Median XT (dB)": round(float(np.median(vals)), 2),
+            "Mean adj (dB)": round(float(np.mean(adj_vals)), 2) if adj_vals else "N/A",
+            "Mean non-adj (dB)": round(float(np.mean(non_adj_vals)), 2) if non_adj_vals else "N/A",
+            "Censored pairs": f"{n_censored}/{n_total}",
+            "Detection limit (dB)": round(float(np.nanmedian(list(res["detection_limits_db"].values()))), 2),
+        })
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(TABLE_DIR, "summary_crosstalk.csv"), index=False)
+    print(f"  Saved: {os.path.join(TABLE_DIR, 'summary_crosstalk.csv')}")
+    # LaTeX (booktabs) export
+    latex = df.to_latex(index=False, escape=False, column_format="l" * len(df.columns))
+    latex = latex.replace("\\toprule", "\\toprule\n").replace("\\midrule", "\\midrule\n").replace("\\bottomrule", "\\bottomrule\n")
+    with open(os.path.join(TABLE_DIR, "summary_crosstalk.tex"), "w") as f:
+        f.write(latex)
+    print(f"  Saved: {os.path.join(TABLE_DIR, 'summary_crosstalk.tex')}")
+    return df
+
+
+def plot_baseline_noise(noise_ref, output_path):
+    channels = list(range(1, 17))
+    rms_05_100 = [noise_ref[ch]["rms_bands_uV"].get("0.5-100Hz", np.nan) for ch in channels]
+    rms_20_450 = [noise_ref[ch]["rms_bands_uV"].get("20-450Hz", np.nan) for ch in channels]
+    fig, ax = plt.subplots(figsize=_fig_size(7.0, 0.5))
+    x = np.arange(len(channels))
+    width = 0.35
+    ax.bar(x - width / 2, rms_05_100, width, label="0.5-100 Hz", color="#4472C4")
+    ax.bar(x + width / 2, rms_20_450, width, label="20-450 Hz", color="#ED7D31")
+    ax.axvline(7.5, color="black", linestyle="--", linewidth=1, label="ADS1299 boundary")
+    ax.set_xlabel("Channel")
+    ax.set_ylabel("RMS noise (uV)")
+    ax.set_title("Per-Channel Noise Floor (Baseline)", fontsize=10, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(c) for c in channels])
+    ax.legend(fontsize=7)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def plot_baseline_psd(noise_ref, output_path):
+    fig, ax = plt.subplots(figsize=_fig_size(7.0, 0.6))
+    colors = plt.cm.tab20(np.linspace(0, 1, 16))
+    for ch in range(1, 17):
+        nr = noise_ref[ch]
+        ax.plot(nr["welch_freqs_hz"], nr["welch_density_nv"], color=colors[ch - 1], label=f"CH{ch}", linewidth=0.7)
+    for h in range(1, 11):
+        ax.axvline(50 * h, color="red", linestyle=":", alpha=0.3, linewidth=0.5)
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("PSD (nV$^2$/Hz)")
+    ax.set_title("Baseline PSD – All 16 Channels", fontsize=10, fontweight="bold")
+    ax.set_xlim([0, 500])
+    ax.legend(fontsize=5.5, ncol=4, loc="upper right")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def export_baseline_table(noise_ref, output_path):
+    channels = list(range(1, 17))
+    rows = []
+    for ch in channels:
+        nr = noise_ref[ch]
+        rows.append({
+            "Channel": ch,
+            "Mean (uV)": round(nr["mean_uV"], 2),
+            "RMS (uV)": round(nr["rms_uV"], 2),
+            "Vpp (uV)": round(nr["vpp_uV"], 1),
+            "Noise 0.5-100Hz (uV)": round(nr["rms_bands_uV"].get("0.5-100Hz", np.nan), 2),
+            "Noise 20-450Hz (uV)": round(nr["rms_bands_uV"].get("20-450Hz", np.nan), 2),
+        })
+    df = pd.DataFrame(rows)
+    medians = {
+        "Channel": "Median",
+        "Mean (uV)": round(df["Mean (uV)"].median(), 2),
+        "RMS (uV)": round(df["RMS (uV)"].median(), 2),
+        "Vpp (uV)": round(df["Vpp (uV)"].median(), 1),
+        "Noise 0.5-100Hz (uV)": round(df["Noise 0.5-100Hz (uV)"].median(), 2),
+        "Noise 20-450Hz (uV)": round(df["Noise 20-450Hz (uV)"].median(), 2),
+    }
+    df = pd.concat([df, pd.DataFrame([medians])], ignore_index=True)
+    fig, ax = plt.subplots(figsize=_fig_size(7.0, 0.5))
+    ax.axis("off")
+    table = ax.table(cellText=df.values, colLabels=df.columns, loc="center", cellLoc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(7)
+    table.scale(1, 1.5)
+    for j in range(len(df.columns)):
+        table[0, j].set_facecolor("#4472C4")
+        table[0, j].set_text_props(color="white", fontweight="bold")
+    for j in range(len(df.columns)):
+        table[len(df), j].set_facecolor("#D9E2F3")
+        table[len(df), j].set_text_props(fontweight="bold")
+    ax.set_title("Baseline Noise per Channel", fontsize=10, fontweight="bold", pad=10)
+    plt.tight_layout()
+    plt.savefig(os.path.join(FIGURE_DIR, "fig9_baseline_table.png"), dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(os.path.join(FIGURE_DIR, "fig9_baseline_table.pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: fig9_baseline_table.png/pdf")
+    df.to_csv(os.path.join(TABLE_DIR, "baseline_channels.csv"), index=False)
+    print(f"  Saved: {os.path.join(TABLE_DIR, 'baseline_channels.csv')}")
+    latex = df.to_latex(index=False, escape=False, column_format="l" * len(df.columns))
+    with open(os.path.join(TABLE_DIR, "baseline_channels.tex"), "w") as f:
+        f.write(latex)
+    print(f"  Saved: {os.path.join(TABLE_DIR, 'baseline_channels.tex')}")
+    return df
+
+
+def plot_snr_helper(noise_ref, crosstalk, output_path):
+    conditions = [(10, 2), (10, 10), (100, 2), (100, 10)]
+    fig, axes = plt.subplots(2, 2, figsize=_fig_size(7.0, 0.8))
+    axes = axes.flatten()
+    for idx, (f0, amp) in enumerate(conditions):
+        ax = axes[idx]
+        if (f0, amp) not in crosstalk:
+            continue
+        res = crosstalk[(f0, amp)]
+        snr_vals = []
+        for ch in range(1, 17):
+            A_sig = res["driven_amps_uV"].get(ch, np.nan)
+            noise_rms = noise_ref[ch]["rms_bands_uV"].get("0.5-100Hz", np.nan)
+            if np.isfinite(A_sig) and np.isfinite(noise_rms) and noise_rms > 0:
+                snr = 20 * np.log10(A_sig / noise_rms)
+            else:
+                snr = np.nan
+            snr_vals.append(snr)
+        ax.bar(range(1, 17), snr_vals, color="#4472C4")
+        ax.axhline(0, color="black", linewidth=0.5)
+        ax.set_xlabel("Channel")
+        ax.set_ylabel("SNR (dB)")
+        ax.set_title(f"{f0} Hz, {amp} mVpp – SNR (band: 0.5-100 Hz)", fontsize=8)
+        ax.set_xticks(range(1, 17))
+    plt.suptitle("SNR Helper: 20*log10(A_sig / noise_RMS_0.5-100Hz)", fontsize=10, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path.replace(".png", ".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    print("=" * 70)
+    print("Plotting Stage: Generating Figures and Tables")
+    print("=" * 70)
+
+    crosstalk, noise_ref, baseline_info, driven_psds = load_interim()
+    print(f"\nLoaded: {len(crosstalk)} conditions, {len(noise_ref)} channels")
+    baseline_duration = baseline_info.get("duration_s", 0)
+
+    print("\nGenerating figures and tables...")
+    plot_parameter_overview(crosstalk, baseline_duration,
+                            os.path.join(FIGURE_DIR, "fig1_parameter_overview.png"))
+    plot_psd_overlay(noise_ref, driven_psds,
+                     os.path.join(FIGURE_DIR, "fig2_psd_overlay.png"))
+    plot_crosstalk_matrix(crosstalk,
+                          os.path.join(FIGURE_DIR, "fig3_crosstalk_matrix.png"))
+    plot_crosstalk_vs_distance(crosstalk,
+                               os.path.join(FIGURE_DIR, "fig4_crosstalk_vs_distance.png"))
+    plot_freq_amp_dependence(crosstalk,
+                             os.path.join(FIGURE_DIR, "fig5_freq_amp_dependence.png"))
+    export_summary_table(crosstalk,
+                         os.path.join(TABLE_DIR, "summary_crosstalk.csv"))  # CSV + LaTeX only, no figure
+    plot_baseline_noise(noise_ref,
+                        os.path.join(FIGURE_DIR, "fig7_baseline_noise.png"))
+    plot_baseline_psd(noise_ref,
+                      os.path.join(FIGURE_DIR, "fig8_baseline_psd.png"))
+    export_baseline_table(noise_ref,
+                          os.path.join(TABLE_DIR, "baseline_channels.csv"))
+    plot_snr_helper(noise_ref, crosstalk,
+                    os.path.join(FIGURE_DIR, "fig10_snr_helper.png"))
+
+    print("\nPlotting stage complete.")
+
+
+if __name__ == "__main__":
+    main()
