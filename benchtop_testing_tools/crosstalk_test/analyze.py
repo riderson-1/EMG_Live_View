@@ -315,13 +315,16 @@ def main():
                     ls = amplitude_ls_sine_fit(t, seg, FS, f0)
                     seg_ls[c].append(ls["amp_peak_uV"])
 
-            # Welch PSD of the driven channel (for the PSD overlay figure)
-            if ch in PSD_CHANNELS and (f0, amp) not in driven_psds:
-                nperseg = min(2048, len(ch_data_uV[ch]))
-                f_psd, psd = sp_signal.welch(ch_data_uV[ch], fs=FS, window="hann",
-                                             nperseg=nperseg, noverlap=nperseg // 2,
-                                             scaling="density")
-                driven_psds[(f0, amp, ch)] = (f_psd, np.sqrt(psd) * 1e9)
+            # Welch PSDs of all 16 channels (for the PSD overlay figure)
+            # Key includes the driven channel so PSDs from each driven
+            # channel's own recording are kept separately.
+            if ch in PSD_CHANNELS and (f0, amp, ch) not in driven_psds:
+                nperseg = min(2048, len(ch_data_uV[1]))
+                for c in range(1, 17):
+                    f_psd, psd = sp_signal.welch(ch_data_uV[c], fs=FS, window="hann",
+                                                 nperseg=nperseg, noverlap=nperseg // 2,
+                                                 scaling="density")
+                    driven_psds[(f0, amp, ch, c)] = (f_psd, np.sqrt(psd) * 1e9)
 
             amp_per_channel = {}
             for c in range(1, 17):
@@ -448,7 +451,7 @@ def main():
              noise_mean_uV=np.array([m[7] for m in noise_data]),
              noise_rms_uV=np.array([m[8] for m in noise_data]),
              noise_vpp_uV=np.array([m[9] for m in noise_data]),
-             psd_keys=np.array([f"{f0}_{amp}_{ch}" for (f0, amp, ch) in driven_psds.keys()], dtype=object),
+             psd_keys=np.array([f"{f0}_{amp}_{ch}_{c}" for (f0, amp, ch, c) in driven_psds.keys()], dtype=object),
              psd_freqs=np.array([v[0] for v in driven_psds.values()], dtype=object),
              psd_density_nv=np.array([v[1] for v in driven_psds.values()], dtype=object),
              baseline_info=baseline_info,
