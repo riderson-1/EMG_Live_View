@@ -170,11 +170,27 @@ def plot_psd_overlay(noise_ref, driven_psds, output_dir):
                         linewidth=0.8, alpha=0.9, label=f"Baseline CH{driven_ch}")
             ax.set_xscale("log")
             ax.set_yscale("log")
-            ax.set_xlim([0.5, 500])
+            ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
+
+            if f0 == 100:
+                ax.set_xlim([50, 500])
+                ax.get_xaxis().set_minor_formatter(matplotlib.ticker.ScalarFormatter())
+                ax.set_xticks([50, 60, 70, 80, 90, 100, 200, 300, 400, 500], minor=True)
+                ax.set_xticklabels(["50", "", "", "", "", "", "", "", "", "500"], minor=True)
+                ax.tick_params(axis="x", which="minor")
+
+            else:
+                ax.set_xlim([0.5, 500])
+                
             ax.set_xlabel("Frequency (Hz)")
             ax.set_ylabel("PSD (mV²/Hz)")
             ax.set_title(f"CH{driven_ch} driven, {f0} Hz, {amp} mVpp", fontsize=8)
-            ax.legend(fontsize=5.5, loc="upper right")
+            
+            if f0 == 100:
+                ax.legend(fontsize=5.5, loc="upper right")
+            else:
+                ax.legend(fontsize=5.5, loc="upper right")
+            
             ax.grid(alpha=0.3, linewidth=0.3, which="both")
         plt.suptitle(f"PSD Overlay – {f0} Hz, {amp} mVpp (log-log)",
                      fontsize=10, fontweight="bold")
@@ -312,11 +328,10 @@ def plot_freq_amp_dependence(crosstalk, output_path):
         vals = vals[np.isfinite(vals)]
         cond_means[key] = np.mean(vals) if len(vals) > 0 else np.nan
 
-    fig, axes = plt.subplots(1, 2, figsize=_fig_size(7.0, 0.6))
+    fig, ax = plt.subplots(figsize=_fig_size(3, 2))
 
-    ax = axes[0]
     x = np.arange(2)
-    width = 0.35
+    width = 0.3
     for k, amp in enumerate(AMPLITUDES_MVPP):
         y = [cond_means.get((10, amp), np.nan), cond_means.get((100, amp), np.nan)]
         bars = ax.bar(x + (k - 0.5) * width, y, width, label=f"{amp} mVpp")
@@ -328,21 +343,6 @@ def plot_freq_amp_dependence(crosstalk, output_path):
     ax.set_xlabel("Frequency")
     ax.set_ylabel("Mean crosstalk (dB)")
     ax.set_title("Frequency dependence", fontsize=9)
-    ax.legend(fontsize=7)
-    ax.axhline(0, color="gray", linewidth=0.5)
-
-    ax = axes[1]
-    for k, f0 in enumerate([10, 100]):
-        y = [cond_means.get((f0, 2), np.nan), cond_means.get((f0, 10), np.nan)]
-        bars = ax.bar(x + (k - 0.5) * width, y, width, label=f"{f0} Hz")
-        for xi, yi in zip(x + (k - 0.5) * width, y):
-            if np.isfinite(yi):
-                ax.text(xi, yi, f"{yi:.1f}", ha="center", va="bottom" if yi < 0 else "top", fontsize=7)
-    ax.set_xticks(x)
-    ax.set_xticklabels(["2 mVpp", "10 mVpp"])
-    ax.set_xlabel("Amplitude")
-    ax.set_ylabel("Mean crosstalk (dB)")
-    ax.set_title("Amplitude dependence", fontsize=9)
     ax.legend(fontsize=7)
     ax.axhline(0, color="gray", linewidth=0.5)
 
@@ -469,17 +469,24 @@ def export_baseline_table(noise_ref, output_path):
     df = pd.concat([df, pd.DataFrame([medians])], ignore_index=True)
     fig, ax = plt.subplots(figsize=_fig_size(7.0, 0.5))
     ax.axis("off")
+
+    numeric_cols = [1, 2, 3, 4]
     table = ax.table(cellText=df.values, colLabels=df.columns, loc="center", cellLoc="center")
     table.auto_set_font_size(False)
     table.set_fontsize(7)
     table.scale(1, 1.5)
-    for j in range(len(df.columns)):
-        table[0, j].set_facecolor("#4472C4")
-        table[0, j].set_text_props(color="white", fontweight="bold")
-    for j in range(len(df.columns)):
-        table[len(df), j].set_facecolor("#D9E2F3")
-        table[len(df), j].set_text_props(fontweight="bold")
-    ax.set_title("Baseline Noise per Channel", fontsize=10, fontweight="bold", pad=10)
+    for i in range(len(df)):
+        for j in range(len(df.columns)):
+            if i == 0:
+                table[i, j].set_facecolor("#4472C4")
+                table[i, j].set_text_props(color="white", fontweight="bold")
+            elif j in numeric_cols and i < len(df) - 1:
+                table[i, j].set_facecolor("white")
+                table[i, j].set_text_props(color="black")
+            elif i == len(df):
+                table[i, j].set_facecolor("#D9E2F3")
+                table[i, j].set_text_props(fontweight="bold", color="black")
+    ax.set_title("Baseline Noise per Channel", fontsize=10, fontweight="bold", pad=50)
     plt.tight_layout()
     plt.savefig(os.path.join(FIGURE_DIR, "fig9_baseline_table.png"), dpi=300, bbox_inches="tight", facecolor="white")
     plt.savefig(os.path.join(FIGURE_DIR, "fig9_baseline_table.pdf"), bbox_inches="tight", facecolor="white")
@@ -549,7 +556,7 @@ def main():
     plot_crosstalk_vs_distance(crosstalk,
                                os.path.join(FIGURE_DIR, "fig4_crosstalk_vs_distance.png"))
     plot_freq_amp_dependence(crosstalk,
-                             os.path.join(FIGURE_DIR, "fig5_freq_amp_dependence.png"))
+                              os.path.join(FIGURE_DIR, "fig5_freq_amp_dependence.png"))
     export_summary_table(crosstalk,
                          os.path.join(TABLE_DIR, "summary_crosstalk.csv"))  # CSV + LaTeX only, no figure
     plot_baseline_noise(noise_ref,
@@ -558,8 +565,7 @@ def main():
                       os.path.join(FIGURE_DIR, "fig8_baseline_psd.png"))
     export_baseline_table(noise_ref,
                           os.path.join(TABLE_DIR, "baseline_channels.csv"))
-    plot_snr_helper(noise_ref, crosstalk,
-                    os.path.join(FIGURE_DIR, "fig10_snr_helper.png"))
+    plot_snr_helper(noise_ref, crosstalk, os.path.join(FIGURE_DIR, "fig10_snr_helper.png"))
 
     print("\nPlotting stage complete.")
 
