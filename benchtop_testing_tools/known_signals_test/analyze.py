@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""
+Data processing stage of the known-signal test analysis pipeline.
+
+A function generator fed the same sine wave to all channels simultaneously.
+For every condition folder (ALL_<gain>G_Sine_<amp>mVpp_<freq>Hz) this script
+loads the PC.csv recording, converts ADC counts to volts, fits an ideal sine
+at the KNOWN nominal frequency (3-parameter linear least squares, IEEE 1057),
+computes amplitude error, SINAD and ENOB per channel, aggregates over the
+channels, and saves tables plus interim data for plot.py.
+
+Sample rate: the ADS1299 is clocked with 2.000 MHz instead of the nominal
+2.048 MHz, so the true rate is ~980 SPS, not 1000. This is confirmed by the
+tone frequency (all tones appear at x1.0202 of nominal when read as 1000 SPS)
+and by the capture logs (EMG rate ~979 Hz). The effective rate is therefore
+estimated per file from the known tone and used as the fit time base; the fit
+itself stays at the KNOWN nominal frequency. The 500 Hz conditions are above
+Nyquist (~490 Hz) and appear aliased to ~480 Hz; the alias is handled in the
+rate estimation.
+
+Amplitude roll-off with frequency (10 Hz ~99% of nominal, 100 Hz ~64%,
+250 Hz ~25%, 500 Hz ~4.5%) is caused by the RC low-pass filter on the PCB
+before the inputs (plus ADS1299 sinc droop near Nyquist). It is a property of
+the signal chain, not a bug, and is reported as measured.
+
+Baseline from the crosstalk test (breakout baseline) is not needed here:
+SINAD is computed from the fit residual of the driven signal itself.
+
+Usage:
+    python3 analyze.py
+"""
+
+import os
+import re
+import glob
+import numpy as np
+import pandas as pd
+
+# ============================================================================
+# CONFIGURATION CONSTANTS
+# ============================================================================
+
+ROOT_PATH = "/home/karl/Documents/Master_Thesis/Testing/benchtop_testing/known_signal_test"
+OUTPUT_DIR = "/home/karl/repos/Sokosti_tools/benchtop_testing_tools/known_signals_test/outputs"
+
+FS_NOMINAL = 1000        # nominal sample rate (folder labels, sample counting)
+FS_EXPECTED = 980.0      # true rate: ADC clock 2.000 MHz -> ~980 SPS
+FS_TOL = [970.0, 990.0]  # plausible range used to validate the per-file estimate
+VREF = 4.5               # ADC reference voltage [V]
+N_CHANNELS = 16          # recorded EMG channels (ch1..ch16)
+WINDOW_S = 3.0           # analysis window length [s, counted at nominal rate]
+N_WINDOW = int(FS_NOMINAL * WINDOW_S)
+
+# Expected test grid, used to report missing conditions
+EXPECTED_GAINS = [1, 8]
+EXPECTED_AMPS_MVPP = [0.1, 2, 10]
+EXPECTED_FREQS_HZ = [10, 100, 250, 500]
+
+# Folder name encodes the condition; anything else (Pictures, .log files,
+# other folders) is ignored.
+FOLDER_RE = re.compile(r"^ALL_(\d+)G_Sine_([0-9.]+)mVpp_(\d+)Hz$")
+
+TABLE_DIR = os.path.join(OUTPUT_DIR, "tables")
+INTERIM_PATH = os.path.join(OUTPUT_DIR, "interim_data.npz")
+os.makedirs(TABLE_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# ============================================================================
+# DATA LOADING
+# ============================================================================
+
+def parse_folder(name):
+    """Return (gain, amp_mVpp, freq_Hz) for a matching folder name, else None."""
+    m = FOLDER_RE.match(name)
+    if not m:
+        return None
+    return int(m.group(1)), float(m.group(2)), int(m.group(3))
+
+
+def load_window(df, n_samples, glitch_thr=None, lsb=1.0):
+    """Return (window_dataframe, info).
+
+    Sample-counter consistency is checked (diff(sample) == 1). Gaps are
+    never interpolated; they are logged and the first run of at least
+    n_samples consecutive samples is used as the analysis window.
+
+    If glitch_thr (volts) is given, a candidate window containing a
+    sample-to-sample jump larger than glitch_thr on any channel (a recording
+    transient; the sample counter stays continuous through it) is rejected
+    and the window start is moved past the transient, repeating up to 10
+    times. If no clean window is found, the last candidate is used and
+    flagged. lsb converts counts to volts for the threshold check.
+    """
+    samples = df["sample"].to_numpy(np.int64)
+    steps = np.diff(samples)
+    gap_idx = np.where(steps != 1)[0]
+    starts = np.concatenate(([0], gap_idx + 1))
+    ends = np.concatenate((gap_idx + 1, [len(df)]))
+    total_lost = int(np.sum(np.maximum(steps - 1, 0)))
+
+    info = {
+        "n_gaps": len(gap_idx), "total_lost_samples": total_lost,
+        "n_samples_full": len(df), "window_start": 0,
+        "glitch_shifted": False, "glitch_max_v": np.nan,
+        "glitch_channels": "",
+    }
+
+    def first_window(search):
+        """First window of n_samples consecutive samples starting at/after
+        `search`, or None."""
+        for s, e in zip(starts, ends):
+            st = max(s, search)
+            if e - st >= n_samples:
+                return st
+        return None
+
+    def scan_glitches(st):
+        """(first glitch position, largest glitch [V], glitched channels)
+        within the candidate window, or (None, ...) if it is clean."""
+        g_pos, g_max, g_ch = None, 0.0, []
+        for ch in range(1, N_CHANNELS + 1):
+            y = df[f"ch{ch}"].to_numpy(dtype=float)[st:st + n_samples]
+            d = np.abs(np.diff(y)) * lsb
+            ex = np.flatnonzero(d > glitch_thr)
+            if len(ex):
+                g_ch.append(ch)
+                g_max = max(g_max, float(d[ex].max()))
+                pos = st + int(ex[0])
+                if g_pos is None or pos < g_pos:
+                    g_pos = pos
+        return g_pos, g_max, g_ch
+
+    search, start = 0, None
+    for attempt in range(10):
+        st = first_window(search)
+        if st is None:
+            if attempt == 0:
+                raise ValueError(
+                    f"no continuous run of {n_samples} samples "
+                    f"(file has {len(df)} samples)")
+            break
+        start = st
+        if glitch_thr is None:
+            break
+        g_pos, g_max, g_ch = scan_glitches(st)
+        if g_pos is None:
+            break
+        info["glitch_shifted"] = True
+        info["glitch_max_v"] = g_max
+        info["glitch_channels"] = ",".join(f"ch{c}" for c in g_ch)
+        if attempt == 9:
+            info["glitch_unresolved"] = True
+            break
+        search = g_pos + 2   # step over the transient (jump + return)
+    if start is None:
+        raise ValueError("no usable analysis window")
+
+    info["window_start"] = start
+    seg = df.iloc[start:start + n_samples].reset_index(drop=True)
+    return seg, info
+
+
+def counts_to_v(counts, gain):
+    """Convert signed 24-bit ADC counts to volts.
+
+    LSB = 2 * Vref / (gain * 2^24)
+    """
+    lsb = 2.0 * VREF / (gain * 2 ** 24)
+    return counts * lsb
+
+
+# ============================================================================
+# SAMPLE RATE ESTIMATION
+# ============================================================================
+
+def estimate_fs(y, f_nom):
+    """Effective sample rate, estimated from the known tone over a long record.
+
+    The tone appears at digital frequency d/FS_NOMINAL (d = spectral peak in
+    Hz read as 1000 SPS). Two interpretations are consistent with a peak:
+
+        non-aliased: fs = 1000 * f_nom / d          (f_nom < fs/2)
+        aliased:     fs = 1000 * f_nom / (1000 - d) (f_nom > fs/2)
+
+    The candidate closest to FS_EXPECTED wins (for 500 Hz, f_nom is above the
+    ~490 Hz Nyquist and only the aliased branch is physical). Returns
+    (fs, f_peak_displayed), or (None, d) if no plausible rate results.
+    Use the full recording: a 3 s window only gives 0.33 Hz bins, which is
+    too coarse to calibrate the rate at 10 Hz.
+    """
+    n = len(y)
+    seg = y - np.mean(y)
+    w = np.hanning(n)
+    S = np.abs(np.fft.rfft(seg * w))
+    fr = np.fft.rfftfreq(n, d=1.0 / FS_NOMINAL)
+
+    # Search window around the expected displayed tone (nominal x ~1.02, or
+    # aliased to ~1000*fs-f_nom for the above-Nyquist conditions)
+    lo, hi = 0.95 * f_nom, 1.10 * f_nom
+    if f_nom > 0.4 * FS_NOMINAL:
+        lo, hi = 0.90 * f_nom, 0.995 * FS_NOMINAL
+    band = (fr >= lo) & (fr <= hi)
+    if not np.any(band):
+        return None, None
+    idx = np.flatnonzero(band)
+    k = idx[np.argmax(S[idx])]
+    if k == 0 or k == len(S) - 1:
+        return None, None
+
+    # Sub-bin refinement (quadratic interpolation of log magnitude)
+    a, b, c = np.log(S[k - 1] + 1e-30), np.log(S[k] + 1e-30), np.log(S[k + 1] + 1e-30)
+    dk = 0.5 * (a - c) / (a - 2 * b + c)
+    d = fr[k] + dk * (fr[1] - fr[0])
+
+    fs_lin = FS_NOMINAL * f_nom / d
+    fs_ali = FS_NOMINAL * f_nom / (FS_NOMINAL - d)
+    # Pick the branch closest to the expected rate; accept only a plausible value
+    for cand in (fs_lin, fs_ali):
+        if FS_TOL[0] <= cand <= FS_TOL[1]:
+            return cand, d
+    return None, d
+
+
+# ============================================================================
+# SINE FIT AND METRICS
+# ============================================================================
+
+def fit_sine_3p(y, f0, fs):
+    """3-parameter linear least-squares fit (IEEE 1057) at the known f0,
+    with time base t = n/fs:
+
+        y ~ a * sin(2*pi*f0*t) + b * cos(2*pi*f0*t) + c
+
+    Returns (a, b, c, fitted_waveform).
+    Note: the frequency is NOT fitted. fs must be the effective sample rate
+    (~980 SPS) or the basis will not match the recorded tone; any remaining
+    deviation shows up in the residual and lowers SINAD. Above Nyquist the
+    basis matches the aliased image of the tone (sin/cos at f and fs-f span
+    the same subspace).
+    """
+    t = np.arange(len(y)) / fs
+    w = 2.0 * np.pi * f0 * t
+    M = np.column_stack([np.sin(w), np.cos(w), np.ones_like(t)])
+    coef, *_ = np.linalg.lstsq(M, y, rcond=None)
+    a, b, dc = coef
+    return a, b, dc, M @ coef
+
+
+def sine_metrics(y, a, b, dc, fit, nominal_vpp):
+    """Amplitude, amplitude error, SINAD and ENOB for one fit."""
+    vpp = 2.0 * float(np.hypot(a, b))
+    amp_err_pct = (vpp - nominal_vpp) / nominal_vpp * 100.0
+
+    residual = y - fit
+    rms_sine = float(np.sqrt(np.mean((fit - dc) ** 2)))   # sine part, DC removed
+    rms_resid = float(np.sqrt(np.mean(residual ** 2)))
+    if rms_sine > 0 and rms_resid > 0:
+        sinad_db = 20.0 * np.log10(rms_sine / rms_resid)
+        enob = (sinad_db - 1.76) / 6.02
+    else:
+        sinad_db, enob = np.nan, np.nan
+
+    return vpp, amp_err_pct, sinad_db, enob
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    print("=" * 70)
+    print("Known-signal test: analysis stage")
+    print("=" * 70)
+
+    # --- Discover condition folders ---
+    folders = sorted(f for f in os.listdir(ROOT_PATH)
+                     if os.path.isdir(os.path.join(ROOT_PATH, f)))
+    found = {}
+    for name in folders:
+        parsed = parse_folder(name)
+        if parsed is not None:
+            found[parsed] = name
+
+    expected = [(g, a, f) for g in EXPECTED_GAINS
+                for a in EXPECTED_AMPS_MVPP for f in EXPECTED_FREQS_HZ]
+    missing = [c for c in expected if c not in found]
+    print(f"\n[1/3] Found {len(found)} condition folders, "
+          f"{len(missing)} missing of {len(expected)} expected")
+
+    # --- Process each condition ---
+    print("\n[2/3] Processing recordings...")
+    results = []        # one dict per condition (aggregated over channels)
+    per_channel = []    # one dict per channel per condition
+    log_rows = []       # per-file log
+    failures = []
+    nyquist_warned = []
+    interim = []        # per-condition arrays for the NPZ
+
+    for key in sorted(found):
+        gain, amp, freq = key
+        folder = found[key]
+        try:
+            files = sorted(glob.glob(os.path.join(ROOT_PATH, folder, "*_PC.csv")))
+            if not files:
+                raise FileNotFoundError("no *_PC.csv in folder")
+            if len(files) > 1:
+                print(f"  WARNING: {folder} has {len(files)} PC.csv files, "
+                      f"using {os.path.basename(files[0])}")
+
+            df_full = pd.read_csv(files[0])
+
+            # A sample-to-sample jump beyond 20x the nominal swing cannot be
+            # part of the driven sine (small common-mode steps are left in
+            # place): treat it as a transient and start the analysis window
+            # after it.
+            lsb = 2.0 * VREF / (gain * 2 ** 24)
+            glitch_thr = 20.0 * amp * 1e-3
+            df_seg, winfo = load_window(df_full, N_WINDOW,
+                                        glitch_thr=glitch_thr, lsb=lsb)
+            if winfo["glitch_shifted"]:
+                print(f"  NOTE: {folder} - transient "
+                      f"(max {winfo['glitch_max_v'] * 1e3:.0f} mV on "
+                      f"{winfo['glitch_channels']}); 3 s window moved to "
+                      f"sample {winfo['window_start']}")
+
+            if freq >= FS_EXPECTED / 2:
+                nyquist_warned.append(folder)
+                print(f"  WARNING: {folder} - {freq} Hz is above Nyquist "
+                      f"({FS_EXPECTED / 2:.0f} Hz at the true ~{FS_EXPECTED:.0f} SPS). "
+                      f"The recorded tone appears aliased; the fit basis follows the "
+                      f"alias. Droop near Nyquist (ADS1299 sinc filter) and the PCB "
+                      f"input RC low-pass are expected, not bugs.")
+
+            # One sample rate per file (all channels share the clock),
+            # estimated from the tone in the FULL record of every channel.
+            fs_ests = []
+            for ch in range(1, N_CHANNELS + 1):
+                y_full = counts_to_v(df_full[f"ch{ch}"].to_numpy(dtype=float), gain)
+                fs_c, _ = estimate_fs(y_full, freq)
+                if fs_c is not None:
+                    fs_ests.append(fs_c)
+            if not fs_ests:
+                raise ValueError(f"cannot estimate sample rate from the {freq} Hz tone")
+            fs_eff = float(np.median(fs_ests))
+
+            data_v = np.full((N_CHANNELS, N_WINDOW), np.nan)
+            fit_v = np.full((N_CHANNELS, N_WINDOW), np.nan)
+            vpp_ch = np.full(N_CHANNELS, np.nan)
+            err_ch = np.full(N_CHANNELS, np.nan)
+            sinad_ch = np.full(N_CHANNELS, np.nan)
+            enob_ch = np.full(N_CHANNELS, np.nan)
+            coef_a = np.full(N_CHANNELS, np.nan)
+            coef_b = np.full(N_CHANNELS, np.nan)
+            coef_c = np.full(N_CHANNELS, np.nan)
+            rows = []
+
+            for ch in range(1, N_CHANNELS + 1):
+                y = counts_to_v(df_seg[f"ch{ch}"].to_numpy(dtype=float), gain)
+                data_v[ch - 1] = y
+
+                a, b, dc, fit = fit_sine_3p(y, freq, fs_eff)
+                vpp, err, sinad, enob = sine_metrics(y, a, b, dc, fit, amp * 1e-3)
+
+                vpp_ch[ch - 1] = vpp
+                err_ch[ch - 1] = err
+                sinad_ch[ch - 1] = sinad
+                enob_ch[ch - 1] = enob
+                fit_v[ch - 1] = fit
+                coef_a[ch - 1] = a
+                coef_b[ch - 1] = b
+                coef_c[ch - 1] = dc
+
+                rows.append({
+                    "gain": gain, "amp_mvpp": amp, "freq_hz": freq,
+                    "channel": ch,
+                    "vpp_v": vpp, "amp_err_pct": err,
+                    "sinad_db": sinad, "enob_bits": enob,
+                })
+            per_channel.extend(rows)
+
+            # Aggregate across the 16 channels (std: sample std, ddof=1)
+            results.append({
+                "gain": gain, "amp_mvpp": amp, "freq_hz": freq,
+                "vpp_mean_v": float(np.nanmean(vpp_ch)),
+                "vpp_std_v": float(np.nanstd(vpp_ch, ddof=1)),
+                "amp_err_mean_pct": float(np.nanmean(err_ch)),
+                "amp_err_min_pct": float(np.nanmin(err_ch)),
+                "amp_err_max_pct": float(np.nanmax(err_ch)),
+                "sinad_mean_db": float(np.nanmean(sinad_ch)),
+                "enob_mean_bits": float(np.nanmean(enob_ch)),
+            })
+            interim.append((gain, amp, freq, vpp_ch, err_ch, sinad_ch,
+                            enob_ch, data_v, fit_v, fs_eff,
+                            coef_a, coef_b, coef_c))
+
+            log_rows.append({
+                "file": os.path.basename(files[0]), "gain": gain,
+                "amp_mvpp": amp, "freq_hz": freq,
+                "n_samples_file": winfo["n_samples_full"],
+                "n_samples_window": N_WINDOW,
+                "fs_eff_sps": fs_eff,
+                "fs_channels_ok": len(fs_ests),
+                "n_gaps": winfo["n_gaps"],
+                "lost_samples": winfo["total_lost_samples"],
+                "window_start": winfo["window_start"],
+                "glitch_shifted": winfo["glitch_shifted"],
+                "glitch_max_mv": (winfo["glitch_max_v"] * 1e3
+                                  if winfo["glitch_shifted"] else ""),
+                "glitch_channels": winfo["glitch_channels"],
+            })
+
+        except Exception as e:
+            failures.append((folder, str(e)))
+            print(f"  FAILED: {folder}: {e}")
+
+    n_ok = len(results)
+
+    # --- Save tables and interim data ---
+    print("\n[3/3] Saving results...")
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(os.path.join(TABLE_DIR, "results.csv"), index=False)
+    pd.DataFrame(per_channel).to_csv(
+        os.path.join(TABLE_DIR, "per_channel.csv"), index=False)
+    pd.DataFrame(log_rows).to_csv(
+        os.path.join(TABLE_DIR, "file_log.csv"), index=False)
+
+    np.savez_compressed(
+        INTERIM_PATH,
+        gains=np.array([r[0] for r in interim]),
+        amps_mvpp=np.array([r[1] for r in interim]),
+        freqs_hz=np.array([r[2] for r in interim]),
+        channels=np.arange(1, N_CHANNELS + 1),
+        vpp_v=np.array([r[3] for r in interim]),
+        amp_err_pct=np.array([r[4] for r in interim]),
+        sinad_db=np.array([r[5] for r in interim]),
+        enob_bits=np.array([r[6] for r in interim]),
+        fs_eff_sps=np.array([r[9] for r in interim]),
+        fit_a=np.array([r[10] for r in interim]),
+        fit_b=np.array([r[11] for r in interim]),
+        fit_c=np.array([r[12] for r in interim]),
+        t_s=np.arange(N_WINDOW) / FS_NOMINAL,
+        data_v=np.array([r[7] for r in interim], dtype=np.float32),
+        fit_v=np.array([r[8] for r in interim], dtype=np.float32),
+    )
+
+    # --- Summary ---
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print(f"  Conditions processed : {n_ok} / {len(expected)} expected")
+    if missing:
+        print("  Missing conditions   :")
+        for g, a, f in missing:
+            print(f"    ALL_{g}G_Sine_{a:g}mVpp_{f}Hz")
+    else:
+        print("  Missing conditions   : none")
+    print(f"  Failed files         : {len(failures)}")
+    for folder, err in failures:
+        print(f"    {folder}: {err}")
+    if nyquist_warned:
+        print(f"  Above Nyquist         : {', '.join(nyquist_warned)} "
+              f"(aliased tone handled; PCB RC low-pass + sinc droop expected)")
+    if n_ok > 0:
+        fs_vals = np.array([r[9] for r in interim])
+        print(f"  Est. sample rate      : {fs_vals.min():.1f} .. {fs_vals.max():.1f} SPS "
+              f"(expected ~{FS_EXPECTED:.0f}: ADC clock 2.000 MHz, not 2.048 MHz)")
+        ok = results_df.dropna(subset=["sinad_mean_db"])
+        best = ok.loc[ok["sinad_mean_db"].idxmax()]
+        worst = ok.loc[ok["sinad_mean_db"].idxmin()]
+        print(f"  Best SINAD by mean    : ALL_{int(best['gain'])}G_Sine_"
+              f"{best['amp_mvpp']:g}mVpp_{int(best['freq_hz'])}Hz "
+              f"({best['sinad_mean_db']:.1f} dB)")
+        print(f"  Worst SINAD by mean   : ALL_{int(worst['gain'])}G_Sine_"
+              f"{worst['amp_mvpp']:g}mVpp_{int(worst['freq_hz'])}Hz "
+              f"({worst['sinad_mean_db']:.1f} dB)")
+
+    print(f"\nSaved results      : {os.path.join(TABLE_DIR, 'results.csv')}")
+    print(f"Saved interim data : {INTERIM_PATH}")
+    print("\nAnalysis stage complete. Run plot.py to generate figures and tables.")
+
+
+if __name__ == "__main__":
+    main()
