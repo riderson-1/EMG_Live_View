@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Sit-to-stand GROUP overlay plotter: one figure comparing BLE and USB
-directly, built from the same per-trial pipeline CSVs as
-plot_sit_stand_trials.py:
+Gait GROUP overlay plotter: one figure per walk type comparing BLE and
+USB directly, built from the same per-trial pipeline CSVs as
+plot_gait_trials.py (written by gait_analysis.py --save-trial-csv):
 
     <stem>_signals.csv  - 50 Hz IMU/PCA grid + '# key: value' header comments
     <stem>_emg.csv      - 1000 Hz EMG envelope (µV) + header comments
 
-Figure layout (2 x 2 quadrants). Every cell overlays the USB and BLE
-gain-1 PC recordings of one subject, mean + 90 % CI only (no individual
-cycle traces):
+One figure per walk type (gait_<type>_overlay.png), 2 x 2 quadrants.
+Every cell overlays the USB and BLE gain-1 PC recordings of one subject,
+mean + 90 % CI only (no individual cycle traces):
 
     top-left:     Karl  Euler angles (gain 1)    top-right:  Max  Euler angles (gain 1)
     bottom-left:  Karl                           bottom-right: Max
-        2. EMG ch1 envelope (µV)                   2. EMG ch1 envelope (µV)
-        3. dynamic accel PC1 (g)                   3. dynamic accel PC1 (g)
-        4. angular-rate PC1 (deg/s)                4. angular-rate PC1 (deg/s)
+        2. EMG envelope (µV)                        2. EMG envelope (µV)
+        3. dynamic accel PC1 (g)                    3. dynamic accel PC1 (g)
+        4. angular-rate PC1 (deg/s)                 4. angular-rate PC1 (deg/s)
 
 Colour = connection everywhere (BLE tab:blue, USB tab:orange); the Euler
 cell keeps the angles apart by line style (roll solid, pitch dashed, yaw
 dotted); each of signals 2-4 keeps its own subplot with the USB and BLE
 curves overlaid.
 
-Also writes group_overlay_plot_data.csv with exactly the plotted numbers
+Also writes gait_overlay_plot_data.csv with exactly the plotted numbers
 (trial, signal, cycle %, mean, CI low/high, n_cycles).
 
 Usage:
-    python plot_sit_stand_group_overlay.py                 # default: PC, gain 1
-    python plot_sit_stand_group_overlay.py --out-dir DIR   # custom output folder
+    python plot_gait_group_overlay.py                 # all three walk types
+    python plot_gait_group_overlay.py --out-dir DIR   # custom output folder
+    python plot_gait_group_overlay.py --walk-type Incline
 """
 import argparse
 import os
@@ -44,19 +45,21 @@ try:
 except ImportError:
     plt = None
 
-from plot_sit_stand_trials import (
+from plot_gait_trials import (
     BASE,
     SIGNALS,
     cycle_curves,
     find_trials,
     load_trial,
-    parse_transition_times,
+    parse_heel_strikes,
     read_header_comments,
 )
 
 SUBJECTS = ("Karl", "Max")
 CONNECTIONS = ("BLE", "USB")
 CONNECTION_COLORS = {"BLE": "tab:blue", "USB": "tab:orange"}
+
+WALK_TYPES = ("Incline", "Fast", "Slow")
 
 EULER_SIGNALS = [
     ("roll_deg", "roll", "deg"),
@@ -65,19 +68,19 @@ EULER_SIGNALS = [
 ]
 EULER_STYLES = {"roll_deg": "-", "pitch_deg": "--", "yaw_deg": ":"}
 
-CYCLE_XLABEL = "% of sit-to-stand cycle (0 = start of standing up)"
+CYCLE_XLABEL = "% of gait cycle (0 = heel strike)"
 
 
-def find_subject_trials(base, source="PC", gain=1):
-    """The gain-1 trials, keyed (subject, connection); rep 1 == gain 1,
-    PC source only, '# gain' matching in the EMG header.
+def find_subject_trials(base, walk_type, source="PC", gain=1):
+    """The gain-1 trials for one walk type, keyed (subject, connection);
+    rep 1 == gain 1, PC source only, '# gain' matching in the EMG header.
 
     Missing (subject, connection) combinations are simply absent."""
-    trials = find_trials(base, source)
+    trials = find_trials(base, source, walk_type)
     by_key = {}
     for trial_id, signals_path, emg_path in trials:
         m = trial_id.split("_")
-        # BLE_1_Karl_Sit_Stand_2026-09-08_PC
+        # BLE_1_Karl_Fast_Walk_2026-09-08_PC
         connection, rep, subject = m[0], m[1], m[2]
         if rep != str(gain):
             continue
@@ -91,9 +94,9 @@ def find_subject_trials(base, source="PC", gain=1):
 
 
 def compute_curves(meta, signals, emg, cycles, columns):
-    """Cycle-locked curves for the requested columns. Returns
+    """Gait-cycle-locked curves for the requested columns. Returns
     {column: (grid, curves)}; IMU columns are shifted by imu_t0_s into the
-    EMG sample-time base, exactly like plot_sit_stand_group.py."""
+    EMG sample-time base, exactly like plot_gait_group.py."""
     t_imu0 = float(meta.get("imu_t0_s", "0"))
     out = {}
     for col in columns:
@@ -142,7 +145,7 @@ def draw_euler_cell(ax, curves_by_conn, title):
         ax.text(0.5, 0.5, "No data", ha="center", va="center",
                 transform=ax.transAxes, fontsize=8)
     else:
-        ax.legend(loc="center right", fontsize=7, ncol=2)
+        ax.legend(loc="upper right", fontsize=7, ncol=2)
     ax.set_ylabel("Euler angle (deg)")
     ax.set_title(title, fontsize=10)
     ax.set_xlabel(CYCLE_XLABEL)
@@ -173,7 +176,7 @@ def draw_signal_cell(axes, curves_by_conn, title):
             ax.text(0.5, 0.5, "No data", ha="center", va="center",
                     transform=ax.transAxes, fontsize=8)
         else:
-            ax.legend(loc="upper center", fontsize=7)
+            ax.legend(loc="upper right", fontsize=7)
         ax.set_ylabel(f"{label} ({unit})")
         ax.grid(True, alpha=0.3)
     axes[0].set_title(title, fontsize=10)
@@ -205,11 +208,13 @@ def main(argv=None):
                     help="Root folder to search for the trial CSVs")
     ap.add_argument("--out-dir",
                     default=os.path.dirname(os.path.abspath(__file__)),
-                    help="Folder for the figure and the plot-data CSV")
+                    help="Folder for the figures and the plot-data CSV")
     ap.add_argument("--source", choices=("PC", "SD"), default="PC",
                     help="Recording source (default: PC)")
     ap.add_argument("--gain", type=int, default=1,
                     help="Recording gain (default: 1)")
+    ap.add_argument("--walk-type", choices=WALK_TYPES, default=None,
+                    help="Only plot this walk type (default: all three)")
     ap.add_argument("--no-plot", action="store_true",
                     help="Do not open an interactive plot window")
     args = ap.parse_args(argv)
@@ -217,62 +222,70 @@ def main(argv=None):
     if plt is None:
         raise SystemExit("matplotlib is required for the plotter")
 
-    group = find_subject_trials(args.base, args.source, args.gain)
-    if not group:
-        raise SystemExit(f"No matching gain-{args.gain} {args.source} "
-                         f"Sit_Stand trials found under {args.base}")
-    print(f"Found {len(group)} trials: "
-          + ", ".join(t for t, _, _ in group.values()))
-
-    subject_curves = {}
+    walk_types = (args.walk_type,) if args.walk_type else WALK_TYPES
     plot_rows = []
-    for (subject, connection), (trial_id, signals_path,
-                                emg_path) in group.items():
-        loaded = load_trial(signals_path, emg_path)
-        if loaded is None:
-            print(f"{trial_id}: no transition times, skipping")
+    for walk_type in walk_types:
+        group = find_subject_trials(args.base, walk_type, args.source,
+                                    args.gain)
+        if not group:
+            print(f"WARNING: no matching gain-{args.gain} {args.source} "
+                  f"{walk_type}_Walk trials found, skipping")
             continue
-        meta, signals, emg = loaded
-        times = parse_transition_times(meta)
-        cycles = list(zip(times[::2], times[1::2]))
-        columns = [c for c, _, _ in EULER_SIGNALS] + [c for c, _, _ in SIGNALS]
-        curves_by_col = compute_curves(meta, signals, emg, cycles, columns)
-        subject_curves.setdefault(subject, {})[connection] = curves_by_col
-        print(f"{trial_id}: {len(cycles)} cycles")
-        for col in columns:
-            grid, curves = curves_by_col[col]
-            if curves is None:
+        print(f"\n{walk_type} walk: {len(group)} trials: "
+              + ", ".join(t for t, _, _ in group.values()))
+
+        subject_curves = {}
+        for (subject, connection), (trial_id, signals_path,
+                                    emg_path) in group.items():
+            loaded = load_trial(signals_path, emg_path)
+            if loaded is None:
+                print(f"{trial_id}: no heel strikes, skipping")
                 continue
-            n = curves.shape[0]
-            mean, ci = mean_and_ci(curves)
-            for x, m, lo, hi in zip(grid, mean, mean - ci, mean + ci):
-                plot_rows.append({
-                    "trial_id": trial_id,
-                    "signal": col,
-                    "cycle_pct": x,
-                    "mean": m,
-                    "ci_low": lo,
-                    "ci_high": hi,
-                    "n_cycles": n,
-                })
+            meta, signals, emg = loaded
+            strikes = parse_heel_strikes(meta)
+            cycles = list(zip(strikes[:-1], strikes[1:]))
+            columns = ([c for c, _, _ in EULER_SIGNALS]
+                       + [c for c, _, _ in SIGNALS])
+            curves_by_col = compute_curves(meta, signals, emg, cycles,
+                                           columns)
+            subject_curves.setdefault(subject, {})[connection] = curves_by_col
+            print(f"{trial_id}: {len(cycles)} cycles")
+            for col in columns:
+                grid, curves = curves_by_col[col]
+                if curves is None:
+                    continue
+                n = curves.shape[0]
+                mean, ci = mean_and_ci(curves)
+                for x, m, lo, hi in zip(grid, mean, mean - ci, mean + ci):
+                    plot_rows.append({
+                        "trial_id": trial_id,
+                        "signal": col,
+                        "cycle_pct": x,
+                        "mean": m,
+                        "ci_low": lo,
+                        "ci_high": hi,
+                        "n_cycles": n,
+                    })
 
-    for subject in SUBJECTS:
-        present = subject_curves.get(subject, {})
-        missing = [c for c in CONNECTIONS if c not in present]
-        if missing:
-            print(f"WARNING: {subject}: missing {', '.join(missing)} data")
+        for subject in SUBJECTS:
+            present = subject_curves.get(subject, {})
+            missing = [c for c in CONNECTIONS if c not in present]
+            if missing:
+                print(f"WARNING: {subject}: missing "
+                      f"{', '.join(missing)} data")
 
-    fig_path = os.path.join(args.out_dir, "sit_stand_group_overlay.png")
-    suptitle = (f"Sit-to-stand cycle overlays: gain-{args.gain} "
-                f"{args.source} recordings - BLE vs USB per subject")
-    make_overlay_figure(subject_curves, args.gain, suptitle, fig_path)
+        fig_path = os.path.join(args.out_dir,
+                                f"gait_{walk_type.lower()}_overlay.png")
+        suptitle = (f"Gait-cycle overlays ({walk_type} walk): gain-"
+                    f"{args.gain} {args.source} recordings - "
+                    "BLE vs USB per subject")
+        make_overlay_figure(subject_curves, args.gain, suptitle, fig_path)
+        print(f"written: {fig_path}")
 
+    csv_path = os.path.join(args.out_dir, "gait_overlay_plot_data.csv")
     plot_data = pd.DataFrame(plot_rows)
-    csv_path = os.path.join(args.out_dir, "group_overlay_plot_data.csv")
     plot_data.to_csv(csv_path, index=False)
-
-    print(f"written: {fig_path}")
-    print(f"written: {csv_path}  ({len(plot_data)} rows)")
+    print(f"\nwritten: {csv_path}  ({len(plot_data)} rows)")
 
     if not args.no_plot:
         plt.show()

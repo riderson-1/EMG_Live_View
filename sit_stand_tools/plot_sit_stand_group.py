@@ -124,7 +124,7 @@ def plot_overlay(ax, grid, curves, color="black", label_mean="Mean",
         ci = 1.645 * curves.std(axis=0, ddof=1) / np.sqrt(n)
         ax.fill_between(grid, mean - ci, mean + ci, color=color, alpha=0.25,
                         lw=0, label=ci_label if ci_label else None)
-    ax.plot(grid, mean, color=color, lw=1.3, label=label_mean)
+    ax.plot(grid, mean, color=color, lw=1.3, label=f"{label_mean} (n={n})")
     ax.grid(True, alpha=0.3)
 
 

@@ -140,7 +140,7 @@ def make_trial_figure(trial_id, curves_by_signal, out_path):
             ci = 1.645 * curves.std(axis=0, ddof=1) / np.sqrt(n)
             ax.fill_between(grid, mean - ci, mean + ci, color="0.35",
                             alpha=0.35, lw=0, label="90% CI")
-        ax.plot(grid, mean, color="black", lw=1.4, label="Mean")
+        ax.plot(grid, mean, color="black", lw=1.4, label=f"Mean (n={n})")
         ax.set_ylabel(f"{label} ({unit})")
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(True, alpha=0.3)
