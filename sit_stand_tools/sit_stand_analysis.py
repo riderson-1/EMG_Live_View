@@ -40,8 +40,9 @@ Pipeline
    SVM complements the PCA: it says HOW MUCH total motion, the PCA says
    WHICH plane it lives in. SVM cannot distinguish sagittal from frontal
    motion on its own.
-6. Project, fix the arbitrary PCA sign (largest-magnitude peak positive),
-   optionally plot and export the processed signals.
+6. Project, canonicalise the arbitrary PCA sign (angular-rate PC1:
+   pitch-up = positive; dynamic-accel PC1: largest axis component
+   positive), optionally plot and export the processed signals.
 7. Second figure: EMG linear envelope (ch1 by default, --channel) computed
    with the SAME filter chain as emg_isometric.py (bandpass 20-400 Hz +
    notch 48-52 Hz, rectify, low-pass, all zero-phase, gap-aware per
@@ -106,11 +107,27 @@ def pca(X):
     return eigvecs, eigvals / eigvals.sum()
 
 
-def fix_sign(axis, signal):
-    """Flip ``axis``/``signal`` so the largest-magnitude peak is positive."""
-    if abs(signal.min()) > abs(signal.max()):
-        return -axis, -signal
-    return axis, signal
+def fix_sign_rate(rate_axis, rate_pc1):
+    """Canonical polarity for angular-rate PC1: pitch-up = positive.
+
+    The PC sign is arbitrary; anchoring it on the pitch component of
+    the PC1 axis (large and stable for sagittal-dominant motion) keeps
+    PC1 comparable across trials, connections and sources, unlike a
+    signal-peak heuristic, which resolves oppositely whenever the PCA
+    fit window differs."""
+    if rate_axis[1] < 0:
+        return -rate_axis, -rate_pc1
+    return rate_axis, rate_pc1
+
+
+def fix_sign_acc(acc_axis, acc_pc1):
+    """Canonical polarity for dynamic-accel PC1: the axis component
+    with the largest magnitude is made positive (standard PCA sign
+    convention, deterministic for a given axis)."""
+    k = int(np.argmax(np.abs(acc_axis)))
+    if acc_axis[k] < 0:
+        return -acc_axis, -acc_pc1
+    return acc_axis, acc_pc1
 
 
 # ---------------------------------------------------------------------------
@@ -370,12 +387,12 @@ def analyze(t, imu, args):
 
     rate_axis = rate_vecs[:, 0]
     rate_pc1 = rate @ rate_axis
-    rate_axis, rate_pc1 = fix_sign(rate_axis, rate_pc1)
+    rate_axis, rate_pc1 = fix_sign_rate(rate_axis, rate_pc1)
 
     acc_pc1 = acc_dyn @ acc_vecs[:, 0]
     acc_pc2 = acc_dyn @ acc_vecs[:, 1]
     acc_pc3 = acc_dyn @ acc_vecs[:, 2]
-    acc_axis1, acc_pc1 = fix_sign(acc_vecs[:, 0], acc_pc1)
+    acc_axis1, acc_pc1 = fix_sign_acc(acc_vecs[:, 0], acc_pc1)
 
     dom_rate = int(np.argmax(np.abs(rate_axis)))
     corr1 = np.corrcoef(rate_pc1, acc_pc1)[0, 1]

@@ -52,7 +52,7 @@ Run per trial (batched by `rerun_sit_stand.sh`, see Stage 2):
     --no-plot --save-results --save-trial-csv
 ```
 
-The processing chain (load → resample → filter → PCA → SVM → sign fix →
+The processing chain (load → resample → filter → PCA → SVM → canonical sign →
 figures) is documented in `sit_stand_analysis.md`. The pipeline-relevant
 addition is `--save-trial-csv`, which writes **two CSVs per trial** next to
 the capture CSV:
@@ -237,18 +237,17 @@ numpy/scipy/pandas/matplotlib installed.
 - **Manual transition times** are subjective; they are recorded in each
   log's `# Command:` line and in each `_signals.csv` header
   (`transition_times_s`), so the exact cycles can always be audited.
-- **PCA sign is arbitrary**; it is fixed per trial so the largest-magnitude
-  peak is positive. Cross-trial mean curves of PC1 can therefore have
-  inverted polarity between subjects/sessions — check the per-trial figures
-  before over-interpreting the cross-trial plot.
-  **DISCLAIMER (BLE_8_Karl_Sit_Stand_2026-09-14):** the PC and SD variants
-  of this trial look like mirror images of each other (rate-PC1 correlation
-  −0.96). This is NOT a data error: the two files are the same session
-  (raw EMG identical, envelope correlation 0.9996), but the SD capture is
-  longer (91.2 s vs 79.6 s), so the PCA fit windows differ and the
-  largest-peak sign heuristic resolved the arbitrary PCA sign in opposite
-  directions (PC dominant axis roll(x) vs SD yaw(z) — the same roll/yaw
-  sagittal axis, opposite sign). The EMG envelope subplot, which has no sign
-  ambiguity, is unaffected and agrees between the two variants.
+- **PCA sign is arbitrary**; PC1 is canonicalised by convention (angular-
+  rate PC1: axis pitch component positive, "pitch-up = positive"; dynamic-
+  accel PC1: largest-|component| axis entry positive), so PC1 polarity is
+  consistent across trials, connections (BLE/USB) and sources (PC/SD) and
+  cross-trial mean curves are directly comparable.
+  **HISTORY (BLE_8_Karl_Sit_Stand_2026-09-14):** this PC/SD pair used to
+  look like mirror images (rate-PC1 correlation −0.96) because the SD
+  capture is longer (91.2 s vs 79.6 s), so the PCA fit windows differed and
+  the former largest-peak heuristic resolved the sign oppositely — not a
+  data error (same session, raw EMG identical, envelope correlation
+  0.9996). With the convention both variants now agree (rate-PC1
+  correlation +0.95).
 - **SD variants** are analyzed and plotted by default; pass `--source PC` to
   restrict the plots to the PC recordings (as in the Iso_Dor pipeline).

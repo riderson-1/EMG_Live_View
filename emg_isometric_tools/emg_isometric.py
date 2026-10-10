@@ -608,8 +608,11 @@ for ax, contractions, cmap, name in [
     ax.set_title(f"{name} contractions (n={len(segs)})")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=8)
-# auto-scale each subplot independently so weak contractions fill their window,
-# but the y-axis label shows "% of global max" so the scale is comparable
+# Sync the weak subplot's y-axis to the strong subplot's y-axis so both
+# use the same scaling (strong's auto-scale is based on its highest spike).
+if len(bottom_axes) == 2:
+    strong_ylim = bottom_axes[0].get_ylim()
+    bottom_axes[1].set_ylim(strong_ylim)
 fig2.suptitle(f"Isometric contraction analysis (Ch{args.channels[0]}) - "
               f"{os.path.basename(csv_path)}", fontsize=12)
 fig2.tight_layout()

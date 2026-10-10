@@ -56,7 +56,7 @@ Run per trial (batched by `rerun_gait.sh`, see Stage 2):
     --no-plot --save-results --save-trial-csv
 ```
 
-The processing chain (load → resample → filter → PCA → SVM → sign fix →
+The processing chain (load → resample → filter → PCA → SVM → canonical sign →
 figures) is documented in the module docstring of `gait_analysis.py`. The
 pipeline-relevant addition is `--save-trial-csv`, which writes **two CSVs
 per trial** next to the capture CSV.
@@ -271,10 +271,11 @@ numpy/scipy/pandas/matplotlib installed.
 - **Manual heel strikes** are subjective; they are recorded in each log's
   `# Command:` line and in each `_signals.csv` header (`heel_strikes_s`),
   so the exact cycles can always be audited.
-- **PCA sign is arbitrary**; it is fixed per trial so the largest-magnitude
-  peak is positive. Cross-trial mean curves of PC1 can therefore have
-  inverted polarity between subjects/sessions — check the per-trial figures
-  before over-interpreting the cross-trial plot.
+- **PCA sign is arbitrary**; PC1 is canonicalised by convention (angular-
+  rate PC1: axis pitch component positive, "pitch-up = positive"; dynamic-
+  accel PC1: largest-|component| axis entry positive), so PC1 polarity is
+  consistent across trials, connections (BLE/USB) and sources (PC/SD) and
+  the BLE/USB and cross-trial mean curves are directly comparable.
 - **Different EMG channels per subject/session** (Karl ch16, Max-USB ch2,
   Max-BLE ch3): the envelope amplitudes are not directly comparable across
   subjects; compare patterns, not absolute µV.
