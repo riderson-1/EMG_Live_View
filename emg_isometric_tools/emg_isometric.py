@@ -79,6 +79,10 @@ parser.add_argument("--signal-trim", type=float, default=0.0,
                          "from BOTH the start and end of the signal window, to exclude "
                          "the ramp-up and ramp-down and keep only the peak "
                          "(default 0 = whole contraction).")
+parser.add_argument("--fs", type=int, default=980,
+                    help="EMG sampling rate in Hz. The Iso_Dor trials were recorded "
+                         "at 980 sps (not 1000); all time windows on the command line "
+                         "must be scaled accordingly (default 980).")
 args = parser.parse_args()
 
 # ===== LOG CAPTURE (--save-results) =====
@@ -107,7 +111,7 @@ if csv_path is None:
 
 df = pd.read_csv(csv_path)
 
-fs = 1000  # Hz
+fs = args.fs  # Hz (sampling rate: 980 sps for the Iso_Dor trials)
 
 # ADS1299 scaling: raw ADC codes -> volts (Vref = 4.5 V, 24-bit signed)
 VREF = 4.5

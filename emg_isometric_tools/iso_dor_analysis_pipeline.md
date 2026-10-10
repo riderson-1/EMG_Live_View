@@ -61,7 +61,9 @@ Key properties of the raw codes:
 
 - Large DC offset (~300,000 codes ≈ 0.17 V electrode offset) — normal,
   removed by the bandpass filter.
-- Sample rate **fs = 1000 Hz**.
+- Sample rate **fs = 980 Hz** (recordings are 980 sps, not 1000 — verified
+  from the 50 Hz mains peak; all time windows are scaled by 1000/980 so they
+  select the same samples as the old fs = 1000 analysis).
 - BLE recordings contain gaps (dropped samples) visible in the `sample`
   counter; USB recordings are nearly gap-free.
 
@@ -74,7 +76,8 @@ Run per trial (batched by `rerun_iso_dor.sh`, see Stage 1b):
 ```
 .venv/bin/python emg_isometric.py <csv> --channels <ch> --thresh-strong <t> \
     --gain <g> --compare-channels --psd fft --show-windows \
-    --signal-trim 0.05 --noise-offset 1.5 --noise-window 50 --save-results
+    --signal-trim 0.05 --noise-offset 1.530612 --noise-window 50 \
+    --fs 980 --save-results
 ```
 
 ### Processing chain
@@ -90,14 +93,17 @@ Run per trial (batched by `rerun_iso_dor.sh`, see Stage 1b):
 4. **Linear envelope** — rectify + 6 Hz low-pass Butterworth.
 5. **Contraction windows** — manual windows given on the command line
    (`--strong-windows` / `--weak-windows`), determined visually per trial
-   from the magnitude plot. Auto-detection exists but was not used for the
-   final numbers.
+   from the magnitude plot (all 8 BLE runs). The 4 USB runs use
+   auto-detection; its duration thresholds (`--merge-gap 0.511`,
+   `--strong-min 2.0405`, `--weak-min 10.2035`) are the old
+   0.5 s / 2 s / 10 s scaled by 1000/980, so detection selects the same
+   samples as at fs = 1000.
 6. **Channel comparison** (`--compare-channels`) — for *every* channel:
    - **Signal** = mean envelope (µV) over the contraction window, trimmed
      symmetrically by `--signal-trim` (5 %) each side to exclude ramp-up/down.
    - **Noise** = mean envelope (µV) in a window ending `--noise-offset`
-     (1.5 s) before the contraction onset, spanning `--noise-window`
-     (50 % of the contraction duration).
+     (1.530612 s = 1500 samples at 980 Hz) before the contraction onset,
+     spanning `--noise-window` (50 % of the contraction duration).
    - **SNR** = 20·log10(signal/noise), per contraction and per channel.
    - **MDF** (median frequency) from the FFT of the filtered EMG.
 7. **Unit conversion** — all reported values are in **microvolts (µV)**:
@@ -113,8 +119,9 @@ Run per trial (batched by `rerun_iso_dor.sh`, see Stage 1b):
   so the noise estimate is not contaminated by the contraction itself.
 - **Signal trim 5 %**: excludes the ramp-up/ramp-down of each contraction so
   the signal reflects the plateau.
-- **Manual windows**: contraction onsets/ends were set by hand per trial
-  (auto-detection thresholds were unreliable across subjects/dates).
+- **Manual windows**: BLE contraction onsets/ends were set by hand per trial
+  (auto-detection thresholds were unreliable across subjects/dates); the
+  USB trials use the (sample-scaled) auto-detection thresholds.
 - **FFT over full contiguous segments**: the whole recording (gap-aware) is
   used for the MDF spectrum.
 

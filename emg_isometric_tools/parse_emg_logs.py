@@ -74,6 +74,16 @@ def parse_missing(s):
     return None, None
 
 
+def metric_by_prefix(metrics, prefix):
+    """Value of the first metric whose key starts with prefix. The gap
+    statistics label carries the sample rate ('Gap length mean (ms @1000 Hz)'
+    vs '@980 Hz'), so an exact-key lookup would break when fs changes."""
+    for k, v in metrics.items():
+        if str(k).startswith(prefix):
+            return v
+    return None
+
+
 def find_table_header(lines, header_cells, start=0):
     """Find a line index >= start whose markdown table header starts with
     header_cells (in order). Header cells may be matched by prefix, so
@@ -148,6 +158,9 @@ def parse_command(lines):
     m = re.search(r"--gain (\S+)", cmd)
     if m:
         settings["gain"] = float(m.group(1))
+    m = re.search(r"--fs (\S+)", cmd)
+    if m:
+        settings["fs_hz"] = float(m.group(1))
     m = re.search(r"--unit (\S+)", cmd)
     settings["unit"] = m.group(1) if m else "auto"
     m = re.search(r"--channels ([\d ]+?)(?: --|$)", cmd)
@@ -201,8 +214,8 @@ def parse_log_file(path):
     metrics = parse_metric_value(lines)
     gap_count = num(metrics.get("Number of gaps"))
     missing_n, missing_pct = parse_missing(metrics.get("Samples missing"))
-    gap_mean_ms, gap_mean_sd_ms = parse_mean_sd(metrics.get("Gap length mean (ms @1000 Hz)"))
-    gap_max_ms = num(metrics.get("Gap length max (ms @1000 Hz)"))
+    gap_mean_ms, gap_mean_sd_ms = parse_mean_sd(metric_by_prefix(metrics, "Gap length mean (ms"))
+    gap_max_ms = num(metric_by_prefix(metrics, "Gap length max (ms"))
 
     received = None
     for line in lines:
@@ -311,6 +324,17 @@ def parse_log_file(path):
                     "snr": num(r["SNR"]),
                     "snr_db": num(r["SNR (dB)"]),
                 })
+
+    # --- sample rate: from --fs in the command, else the gap-statistics
+    # label ('... (ms @980 Hz)'), else the legacy value (old logs = 1000) ---
+    if trial_row.get("fs_hz") is None:
+        fs_label = None
+        for line in lines:
+            m2 = re.search(r"Gap length \w+ \(ms @([\d.]+) Hz\)", line)
+            if m2:
+                fs_label = float(m2.group(1))
+                break
+        trial_row["fs_hz"] = fs_label if fs_label is not None else 1000.0
 
     # --- best / worst channels ---
     for line in lines:
