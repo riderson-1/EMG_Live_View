@@ -143,7 +143,7 @@ def draw_euler_cell(ax, curves_by_conn, title):
         ax.text(0.5, 0.5, "No data", ha="center", va="center",
                 transform=ax.transAxes, fontsize=8)
     else:
-        ax.legend(loc="upper right", fontsize=7, ncol=2)
+        ax.legend(loc="center right", fontsize=7, ncol=2)
     ax.set_ylabel("Euler angle (deg)")
     ax.set_title(title, fontsize=10)
     ax.set_xlabel(CYCLE_XLABEL)
@@ -173,7 +173,7 @@ def draw_signal_cell(axes, curves_by_conn, title):
             ax.text(0.5, 0.5, "No data", ha="center", va="center",
                     transform=ax.transAxes, fontsize=8)
         else:
-            ax.legend(loc="upper right", fontsize=7)
+            ax.legend(loc="upper center", fontsize=7)
         ax.set_ylabel(f"{label} ({unit})")
         ax.grid(True, alpha=0.3)
     axes[0].set_title(title, fontsize=10)
@@ -185,7 +185,7 @@ def make_overlay_figure(subject_curves, gain, suptitle, out_path):
     subplots below; Karl left, Max right."""
     fig = plt.figure(figsize=(16, 13), constrained_layout=True)
     fig.suptitle(suptitle)
-    outer = fig.add_gridspec(2, 2)
+    outer = fig.add_gridspec(2, 2, height_ratios=[1.0, 2.75])
     for col, subject in enumerate(SUBJECTS):
         curves_by_conn = subject_curves.get(subject, {})
         ax = fig.add_subplot(outer[0, col])
