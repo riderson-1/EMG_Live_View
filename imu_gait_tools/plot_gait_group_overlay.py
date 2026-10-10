@@ -255,7 +255,7 @@ def main(argv=None):
                 if curves is None:
                     continue
                 n = curves.shape[0]
-                mean, ci = mean_and_ci(curves)
+                mean, ci, _n = mean_and_ci(curves)
                 for x, m, lo, hi in zip(grid, mean, mean - ci, mean + ci):
                     plot_rows.append({
                         "trial_id": trial_id,
