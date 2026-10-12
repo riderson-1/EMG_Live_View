@@ -52,9 +52,15 @@ Run per trial (batched by `rerun_gait.sh`, see Stage 2):
 
 ```
 .venv/bin/python gait_analysis.py <csv> --channel <ch> --env-cutoff 15 \
-    --gain <g> --heel-strikes '<t1,t2,...>' --time-axis percent \
-    --no-plot --save-results --save-trial-csv
+    --gain <g> --heel-strikes '<t1,t2,...>' --emg-fs 980 \
+    --time-axis percent --no-plot --save-results --save-trial-csv
 ```
+
+**Sample rate is 980 sps, not 1000** (same as the Iso_Dor and Sit_Stand
+trials): `--emg-fs` defaults to 980, and every command-line time
+(`--heel-strikes`, `--fit-start`/`--fit-end`) lives in that time base.
+Times recorded against the old fs=1000 axis must be scaled by 1000/980 to
+select the same samples (see Stage 2).
 
 The processing chain (load → resample → filter → PCA → SVM → canonical sign →
 figures) is documented in the module docstring of `gait_analysis.py`. The
@@ -95,7 +101,7 @@ needs:
   `mean_cadence_cpm`, and per-cycle `cycle_<k>_start_s` /
   `cycle_<k>_end_s` / `cycle_<k>_duration_s`
 
-### `<stem>_emg.csv` — 1000 Hz EMG envelope
+### `<stem>_emg.csv` — 980 Hz EMG envelope
 
 One row per EMG sample: `t_s, emg_envelope_uV`. Header comments carry the
 command line, channel, gain, µV/code scale and the filter settings
@@ -104,7 +110,7 @@ command line, channel, gain, µV/code scale and the filter settings
 ### Decisions
 
 - **Two CSVs instead of one**: the IMU/PCA signals live on the 50 Hz
-  resampled grid, the EMG envelope on the 1000 Hz EMG grid; merging them
+  resampled grid, the EMG envelope on the 980 Hz EMG grid; merging them
   would NaN-fill 95 % of the IMU columns or downsample the EMG.
 - **Statistics as header comments**: a CSV is a single table, so the
   PCA/cycle metadata go into `# key: value` comment lines at the top —
@@ -118,8 +124,10 @@ command line, channel, gain, µV/code scale and the filter settings
   (t ≳ 1000 s loses the 1 ms digit; t < 1000 s keeps it).
 - **Heel strikes come from the existing logs**: all 18 trials were already
   analyzed with manual heel-strike times; the batch runner reuses them
-  verbatim from each log's `# Command:` line, so no new manual input is
-  needed. (The `heel_strikes.txt` files in the trial folders are incomplete
+  from each log's `# Command:` line, **scaled by 1000/980** so they select
+  the same samples on the 980 sps time base (same convention as
+  `rerun_iso_dor.sh` and `rerun_sit_stand.sh`). (The `heel_strikes.txt`
+  files in the trial folders are incomplete
   — 3 of 18 missing — and partly stale, e.g. BLE_8_Karl_Slow_Walk_2026-09-14
   starts at 1025 in the txt but 1026.1 in the log — so the logs are the
   authoritative source.)
@@ -138,7 +146,8 @@ command line, channel, gain, µV/code scale and the filter settings
 36 commands (18 trials × PC/SD), one per run. Each command reproduces the
 settings of the existing `*_imu_analysis.log` exactly: the per-trial EMG
 channel, `--env-cutoff 15`, the per-session gain (1 or 8), the manual heel
-strikes, default percent time axis, `--no-plot --save-results
+strikes (scaled by 1000/980 for the 980 sps time base), `--emg-fs 980`,
+default percent time axis, `--no-plot --save-results
 --save-trial-csv`.
 
 Rerunning it regenerates all logs, PNGs and the per-trial CSVs with the
@@ -243,6 +252,39 @@ Euler-angle signals).
 
 ---
 
+## Stage 3c: Walk-type overlay figure — `plot_gait_group_overlay.py`
+
+```
+.venv/bin/python plot_gait_group_overlay.py
+```
+
+One figure — `gait_group_overlay.png` — comparing the three walk types
+over USB and BLE, **Max only** (Karl is not considered), gain-1 PC
+recordings. Layout is a **3 × 4 matrix**:
+
+| | col 1 | col 2 | col 3 | col 4 |
+|---|---|---|---|---|
+| row 1 | USB overlays — EMG envelope (µV) | USB peak-to-peak boxes | BLE overlays — EMG envelope | BLE peak-to-peak boxes |
+| row 2 | USB — dyn accel PC1 (g) | USB boxes | BLE — dyn accel PC1 | BLE boxes |
+| row 3 | USB — ang rate PC1 (deg/s) | USB boxes | BLE — ang rate PC1 | BLE boxes |
+
+- **Overlay cells**: Slow / Fast / Incline each drawn as mean + 90 % CI —
+  Slow `tab:blue`, Fast `tab:green`, Incline `tab:red`.
+- **Box-plot cells** (directly right of their overlay): one coloured box
+  per walk type showing the **per-cycle peak-to-peak** distribution
+  (each cycle's max − min ≈ 10 values per box).
+- **Style**: cycle graphs are open panels (no top/right spines) and share
+  **one x axis** — `% of gait cycle (0 = heel strike)` — labelled once
+  under the whole figure; tick labels only on the bottom row. Box plots
+  keep their categorical (walk-type) x axis.
+
+Also writes `gait_overlay_plot_data.csv` (`connection, walk_type,
+trial_id, signal, cycle_pct, mean, ci_low, ci_high, n_cycles`) and
+`gait_overlay_p2p_data.csv` (`connection, walk_type, trial_id, signal,
+cycle, p2p`).
+
+---
+
 ## Reproducing the whole pipeline
 
 ```bash
@@ -256,6 +298,9 @@ bash imu_gait_tools/rerun_gait.sh
 
 # 2b. group figures (gain-1 PC trials, 2x2 quadrants per walk type)
 .venv/bin/python imu_gait_tools/plot_gait_group.py
+
+# 2c. walk-type overlay figure (Max only, 3x4 matrix with box plots)
+.venv/bin/python imu_gait_tools/plot_gait_group_overlay.py
 ```
 
 Python environment: the workspace venv (`.venv/bin/python`, Python 3.12) has

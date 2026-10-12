@@ -22,6 +22,10 @@ Raw CSV recordings          sit_stand_analysis.py         rerun_sit_stand.sh    
                                                       --> group figure (gain-1 PC
                                                           trials, 2x2 quadrants)
                                                           + group_plot_data.csv
+                                                          plot_sit_stand_group_overlay.py
+                                                      --> BLE vs USB overlay figure
+                                                          (raw 16-ch EMG on top)
+                                                          + group_overlay_plot_data.csv
 ```
 
 | Stage | File | Location |
@@ -30,6 +34,7 @@ Raw CSV recordings          sit_stand_analysis.py         rerun_sit_stand.sh    
 | 2. Batch runner | `rerun_sit_stand.sh` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
 | 3. Plotting | `plot_sit_stand_trials.py` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
 | 3b. Group plotting | `plot_sit_stand_group.py` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
+| 3c. BLE vs USB overlay | `plot_sit_stand_group_overlay.py` | `/home/karl/repos/Sokosti_tools/sit_stand_tools/` |
 
 Data locations:
 
@@ -53,9 +58,14 @@ Run per trial (batched by `rerun_sit_stand.sh`, see Stage 2):
 ```
 
 The processing chain (load → resample → filter → PCA → SVM → canonical sign →
-figures) is documented in `sit_stand_analysis.md`. The pipeline-relevant
-addition is `--save-trial-csv`, which writes **two CSVs per trial** next to
-the capture CSV:
+figures) is documented in `sit_stand_analysis.md`. Two pipeline-wide
+conventions to be aware of:
+
+- **Sample rate 980 sps**: `--emg-fs` defaults to 980 (the captures are
+  980 sps, not 1000). All command-line time values live in that time base.
+
+The pipeline-relevant addition is `--save-trial-csv`, which writes **two
+CSVs per trial** next to the capture CSV:
 
 ### `<stem>_signals.csv` — 50 Hz IMU/PCA grid
 
@@ -80,7 +90,7 @@ needs:
 - cycle metadata: `transition_times_s`, `n_cycles`, duration mean/SD/min/max,
   and per-cycle `cycle_<k>_start_s` / `cycle_<k>_end_s` / `cycle_<k>_duration_s`
 
-### `<stem>_emg.csv` — 1000 Hz EMG envelope
+### `<stem>_emg.csv` — 980 Hz EMG envelope
 
 One row per EMG sample: `t_s, emg_envelope_uV`. Header comments carry the
 command line, channel, gain, µV/code scale and the filter settings
@@ -89,7 +99,7 @@ command line, channel, gain, µV/code scale and the filter settings
 ### Decisions
 
 - **Two CSVs instead of one**: the IMU/PCA signals live on the 50 Hz
-  resampled grid, the EMG envelope on the 1000 Hz EMG grid; merging them
+  resampled grid, the EMG envelope on the 980 Hz EMG grid; merging them
   would NaN-fill 95 % of the IMU columns or downsample the EMG.
 - **Statistics as header comments**: a CSV is a single table, so the PCA/cycle
   metadata go into `# key: value` comment lines at the top — auditable,
@@ -109,6 +119,11 @@ command line, channel, gain, µV/code scale and the filter settings
 settings of the existing `*_imu_analysis.log` exactly: the per-session gain
 (1 or 8) and the manual transition times, default ch1 (`--channel 1`),
 percent time axis, `--no-plot --save-results --save-trial-csv`.
+
+Because the time base moved from 1000 to 980 sps, the runner appends
+`--emg-fs 980` and **every transition time was scaled by 1000/980** (same
+convention as `rerun_iso_dor.sh` for its windows), so each cycle selects
+the **same samples** as the original fs = 1000 runs.
 
 Rerunning it regenerates all logs, PNGs and the per-trial CSVs with the
 current script version:
@@ -209,6 +224,47 @@ the three Euler-angle signals).
 
 ---
 
+## Stage 3c: BLE vs USB overlay — `plot_sit_stand_group_overlay.py`
+
+```
+.venv/bin/python plot_sit_stand_group_overlay.py
+```
+
+Reads the same per-trial CSVs as Stage 3 (plus the original capture CSV
+named by the `# input:` header, for the raw EMG) and produces **one
+overlay figure** (`sit_stand_group_overlay.png`) comparing BLE and USB
+gain-1 PC recordings — **Karl left, Max right**:
+
+| Row | Content |
+|-----|---------|
+| top (16 mini panels) | Raw **EMG ch1–ch16 (mV)** — mV instead of µV because of the large DC offset. Every cycle of both connections overlaid as individual traces, colour = connection (BLE tab:blue, USB tab:orange) |
+| 2 | EMG ch1 envelope (µV) — mean + 90 % CI, BLE vs USB overlaid |
+| 3 | dynamic accel PC1 (g) — mean + 90 % CI |
+| 4 | angular-rate PC1 (deg/s) — mean + 90 % CI |
+
+Styling: every panel is **open** (all four spines removed), with **dashed
+gray grid lines** (`--`, alpha 0.5) and **no tick marks** anywhere; x ticks
+and labels appear only on the bottom row, so the figure shares **one common
+x axis** — the phase of the sit-to-stand cycle in percent — and the timing
+dependency between the panels stays visible. Each panel keeps its **own y
+axis**. The legends are unchanged from Stage 3 (BLE/USB mean + 90 % CI,
+with the cycle count `n`).
+
+Notes:
+
+- The raw EMG is read **directly from the original capture CSV** (only
+  the `sample` + `ch1..ch16` columns, only inside the cycle windows) — no
+  large per-trial raw-EMG file is written. Lines are broken at packet
+  gaps (sample-counter jumps), consistent with the gap-aware envelope.
+- The time base is the 980 sps grid (`# emg_fs_hz` header); the scale
+  comes from the `# uv_per_code` header of `_emg.csv` and is converted
+  to **mV** for the raw panels (the envelope panels stay in **µV**).
+- `group_overlay_plot_data.csv` holds the plotted mean/CI numbers of the
+  three mean/CI signals (same schema as Stage 3); the raw individual
+  cycles are not summarised there.
+
+---
+
 ## Reproducing the whole pipeline
 
 ```bash
@@ -222,6 +278,9 @@ bash sit_stand_tools/rerun_sit_stand.sh
 
 # 2b. group figure (gain-1 PC trials, 2x2 quadrants + group_plot_data.csv)
 .venv/bin/python sit_stand_tools/plot_sit_stand_group.py
+
+# 2c. BLE vs USB overlay figure (raw 16-ch EMG on top + group_overlay_plot_data.csv)
+.venv/bin/python sit_stand_tools/plot_sit_stand_group_overlay.py
 ```
 
 Python environment: the workspace venv (`.venv/bin/python`, Python 3.12) has

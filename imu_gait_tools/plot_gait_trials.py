@@ -5,7 +5,7 @@ gait_analysis.py --save-trial-csv
 
     <stem>_signals.csv  - 50 Hz IMU/PCA grid + '# key: value' header comments
                           (PCA statistics, heel strikes, cycle metadata)
-    <stem>_emg.csv      - 1000 Hz EMG envelope (µV) + header comments
+    <stem>_emg.csv      - 980 Hz EMG envelope (µV) + header comments
 
 and produces gait-cycle-locked overlay figures (0-100 % of the gait cycle,
 individual traces + mean + 90 % CI) for the EMG envelope, the dynamic-accel

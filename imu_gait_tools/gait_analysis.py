@@ -60,6 +60,12 @@ Pipeline
 Usage
 -----
 python pca_sagittal_plane_isolation.py CAPTURE.csv
+
+Sample rate: the captures run at 980 sps (NOT 1000 -- same as the Iso_Dor
+and Sit_Stand trials), so --emg-fs defaults to 980. All time values passed
+on the command line (--heel-strikes, --fit-start/--fit-end) live in that
+time base; times recorded against the old fs=1000 axis must be scaled by
+1000/980 to select the same samples.
 python pca_sagittal_plane_isolation.py CAPTURE.csv --fit-start 10 --fit-end 60
 python pca_sagittal_plane_isolation.py CAPTURE.csv --no-plot --save-csv out.csv
 python pca_sagittal_plane_isolation.py CAPTURE.csv --channel 2 --save-results
@@ -496,8 +502,9 @@ def write_trial_csvs(args, res, emg_t, emg_env, sample, legacy, accel_mag,
         rate PC1, dynamic accel, accel PC1/PC2/PC3, rate/accel SVM, with
         '# key: value' header comments carrying the PCA statistics, SVM
         statistics and the gait-cycle metadata.
-    <stem>_emg.csv - 1000 Hz EMG envelope (µV) with '# key: value' header
-        comments carrying the channel, gain, scale and filter settings.
+    <stem>_emg.csv - EMG envelope on the --emg-fs grid (980 Hz) with
+        '# key: value' header comments carrying the channel, gain, scale
+        and the filter settings.
 
     Both files are written next to the capture CSV.
     """
@@ -595,7 +602,7 @@ def write_trial_csvs(args, res, emg_t, emg_env, sample, legacy, accel_mag,
     # ---- <stem>_emg.csv -------------------------------------------------
     uv_per_code = ADS1299_VREF / args.gain / (2 ** 23) * 1e6
     env_hdr = [
-        "# Gait trial EMG envelope (1000 Hz EMG grid)",
+        f"# Gait trial EMG envelope ({args.emg_fs:g} Hz EMG grid)",
         f"# command: {_command_line()}",
         f"# input: {args.input}",
         f"# channel: ch{args.channel}",
@@ -816,8 +823,11 @@ def parse_args(argv=None):
     )
     p.add_argument("input", help="Capture CSV with columns: sample, roll, pitch, "
                                  "yaw, accel_x, accel_y, accel_z")
-    p.add_argument("--emg-fs", type=float, default=1000.0,
-                   help="CSV row rate in Hz used for the time base (default: 1000)")
+    p.add_argument("--emg-fs", type=float, default=980.0,
+                   help="CSV row rate in Hz used for the time base. The "
+                        "Walk captures were recorded at 980 sps (not "
+                        "1000); all time windows on the command line must "
+                        "be given in this time base (default: 980)")
     p.add_argument("--imu-fs", type=float, default=50.0,
                    help="IMU update rate in Hz to resample to (default: 50)")
     p.add_argument("--lp-fc", type=float, default=10.0,
@@ -866,7 +876,7 @@ def parse_args(argv=None):
                    help="Write the per-trial pipeline CSVs next to the "
                         "capture CSV: <stem>_signals.csv (50 Hz IMU/PCA grid "
                         "with header-comment statistics) and <stem>_emg.csv "
-                        "(1000 Hz EMG envelope), consumed by "
+                        "(EMG envelope on the --emg-fs grid), consumed by "
                         "plot_gait_trials.py / plot_gait_group.py")
     return p.parse_args(argv)
 

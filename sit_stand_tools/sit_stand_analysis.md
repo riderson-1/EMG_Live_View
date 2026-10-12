@@ -16,7 +16,21 @@ The IMU sits on the lower leg. The script processes the capture in these steps:
    - **Dynamic-accel PCA**: PC1/PC2 should span the sagittal (forward+vertical) plane; a small PC3 fraction means the motion is mostly planar.
 5. **SVM (Signal Vector Magnitude)** — orientation-independent motion intensity: `|omega|` from the angular rates and `|a_dyn|` from the dynamic acceleration. SVM says *how much* total motion there is; PCA says *which plane* it lives in.
 6. **Canonical sign** — the PCA sign is arbitrary, so PC1 is fixed by convention instead of by signal peaks: **angular-rate PC1 is flipped so its axis pitch component is positive ("pitch-up = positive")** and **dynamic-accel PC1 so its largest-|component| axis entry is positive**. PC1 polarity is then deterministic and comparable across trials, connections (BLE/USB) and sources (PC/SD). A peak heuristic could resolve oppositely whenever the PCA fit window differs — e.g. BLE_8_Karl_Sit_Stand_2026-09-14 PC vs SD used to be mirror images (rate-PC1 correlation −0.96, data itself identical); after canonicalisation both variants agree (rate-PC1 correlation +0.95).
-7. **Figures** (see below).
+7. **EMG envelope** — the EMG channel is filtered exactly like
+   `emg_isometric.py`: 4th-order zero-phase **bandpass 20–400 Hz** +
+   2nd-order zero-phase **notch 48–52 Hz**, then rectify + 4th-order
+   zero-phase low-pass (6 Hz, `--env-cutoff`), computed gap-aware per
+   contiguous received segment and converted to µV.
+8. **Figures** (see below).
+
+### Sample rate: 980 sps, not 1000
+
+The captures are recorded at **980 sps**, so `--emg-fs` defaults to 980
+(same convention as `emg_isometric.py --fs 980`). All command-line time
+values (`--transition-times`, `--fit-start/--fit-end`) live in that time
+base; times that were picked against the old fs = 1000 axis must be
+scaled by 1000/980 so they select the same samples (as done in
+`rerun_sit_stand.sh`).
 
 ### Legacy accelerometer disclaimer
 
@@ -70,7 +84,7 @@ python gait_analysis.py CAPTURE.csv --channel 2 --save-results --no-plot
 | Option | Default | Description |
 |--------|---------|-------------|
 | `input` | — | Capture CSV (columns: sample, roll, pitch, yaw, accel_x/y/z) |
-| `--emg-fs` | 1000 | CSV row rate in Hz (time base) |
+| `--emg-fs` | 980 | CSV row rate in Hz (time base). The captures are 980 sps, **not 1000** — scale command-line time values accordingly |
 | `--imu-fs` | 50 | IMU update rate in Hz to resample to |
 | `--lp-fc` | 10 | Low-pass cutoff for angles (Hz) |
 | `--hp-fc` | 0.2 | High-pass cutoff for gravity removal (Hz) |
@@ -97,7 +111,7 @@ python gait_analysis.py CAPTURE.csv --channel 2 --save-results --no-plot
 | `<csv>_sit_to_stand_cycles.png` | Cycle overlay figure (only if `--transition-times` given) |
 | `<csv>_imu_analysis.log` | Full terminal output (markdown tables) |
 | `<csv>_signals.csv` | Per-trial pipeline CSV: 50 Hz IMU/PCA signals + `# key: value` header comments (PCA stats, SVM stats, cycle metadata) — with `--save-trial-csv` |
-| `<csv>_emg.csv` | Per-trial pipeline CSV: 1000 Hz EMG envelope (µV) + `# key: value` header comments (channel, gain, filters) — with `--save-trial-csv` |
+| `<csv>_emg.csv` | Per-trial pipeline CSV: 980 Hz EMG envelope (µV) + `# key: value` header comments (channel, gain, filters) — with `--save-trial-csv` |
 
 ## Per-trial pipeline CSVs (`--save-trial-csv`)
 
@@ -112,9 +126,11 @@ Two CSVs are written next to the capture CSV, consumed by
   (explained variance, PC1 axes, correlations), SVM statistics, the
   transition times and per-cycle start/end/duration, and `imu_t0_s` (the
   IMU time offset in the EMG sample-time base, for aligning the two CSVs).
-- **`<stem>_emg.csv`** — one row per EMG sample (1000 Hz), columns:
+- **`<stem>_emg.csv`** — one row per EMG sample (on the `--emg-fs` grid,
+  980 Hz), columns:
   `t_s, emg_envelope_uV`. Header comments carry the command line, channel,
-  gain, µV/code scale and the filter settings.
+  gain, µV/code scale and the filter settings (bandpass 20–400 Hz,
+  notch 48–52 Hz, envelope low-pass).
 
 The terminal output includes markdown tables: capture info, gravity estimate, EMG sample loss, EMG envelope filters, angular-rate PCA, dynamic-accel PCA, rate/accel correlations, SVM statistics, and sit-to-stand cycle durations.
 

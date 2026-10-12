@@ -5,7 +5,7 @@ sit_stand_analysis.py --save-trial-csv
 
     <stem>_signals.csv  - 50 Hz IMU/PCA grid + '# key: value' header comments
                           (PCA statistics, transition times, cycle metadata)
-    <stem>_emg.csv      - 1000 Hz EMG envelope (µV) + header comments
+    <stem>_emg.csv      - 980 Hz EMG envelope (µV) + header comments
 
 and produces cycle-locked overlay figures (0-100 % of the sit-to-stand
 cycle, individual traces + mean + 90 % CI) for the EMG envelope, the

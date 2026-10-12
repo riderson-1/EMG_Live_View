@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
 """
-Gait GROUP overlay plotter: one figure per walk type comparing BLE and
-USB directly, built from the same per-trial pipeline CSVs as
+Gait GROUP overlay plotter: ONE figure comparing the three walk types
+over USB and BLE, built from the same per-trial pipeline CSVs as
 plot_gait_trials.py (written by gait_analysis.py --save-trial-csv):
 
     <stem>_signals.csv  - 50 Hz IMU/PCA grid + '# key: value' header comments
-    <stem>_emg.csv      - 1000 Hz EMG envelope (µV) + header comments
+    <stem>_emg.csv      - 980 Hz EMG envelope (µV) + header comments
 
-One figure per walk type (gait_<type>_overlay.png), 2 x 2 quadrants.
-Every cell overlays the USB and BLE gain-1 PC recordings of one subject,
-mean + 90 % CI only (no individual cycle traces):
+Figure layout: 3 rows x 4 columns, Max only (Karl is not considered).
+Rows are the signals; each connection gets an overlay plot with the box
+plot of its peak-to-peak values directly to its right:
 
-    top-left:     Karl  Euler angles (gain 1)    top-right:  Max  Euler angles (gain 1)
-    bottom-left:  Karl                           bottom-right: Max
-        2. EMG envelope (µV)                        2. EMG envelope (µV)
-        3. dynamic accel PC1 (g)                    3. dynamic accel PC1 (g)
-        4. angular-rate PC1 (deg/s)                 4. angular-rate PC1 (deg/s)
+    row 1: EMG envelope (µV)
+    row 2: dynamic accel PC1 (g)
+    row 3: angular-rate PC1 (deg/s)
 
-Colour = connection everywhere (BLE tab:blue, USB tab:orange); the Euler
-cell keeps the angles apart by line style (roll solid, pitch dashed, yaw
-dotted); each of signals 2-4 keeps its own subplot with the USB and BLE
-curves overlaid.
+    col 1: USB overlays      col 2: USB peak-to-peak boxes
+    col 3: BLE overlays      col 4: BLE peak-to-peak boxes
 
-Also writes gait_overlay_plot_data.csv with exactly the plotted numbers
-(trial, signal, cycle %, mean, CI low/high, n_cycles).
+Every overlay cell draws Slow / Fast / Incline mean + 90 % CI
+(Slow tab:blue, Fast tab:green, Incline tab:red). Every box-plot cell
+shows one coloured box per walk type with the PER-CYCLE peak-to-peak
+values (each cycle's max - min) of that row's signal.
+
+The cycle graphs use open panels (no top/right spines) and share ONE
+x axis (% of gait cycle, labelled once under the whole figure); the box
+plots keep their categorical walk-type x axis.
+
+Also writes gait_overlay_plot_data.csv (plotted mean/CI curves) and
+gait_overlay_p2p_data.csv (the per-cycle peak-to-peak values).
 
 Usage:
-    python plot_gait_group_overlay.py                 # all three walk types
+    python plot_gait_group_overlay.py                 # default: PC, gain 1
     python plot_gait_group_overlay.py --out-dir DIR   # custom output folder
     python plot_gait_group_overlay.py --walk-type Incline
 """
@@ -55,48 +60,40 @@ from plot_gait_trials import (
     read_header_comments,
 )
 
-SUBJECTS = ("Karl", "Max")
-CONNECTIONS = ("BLE", "USB")
-CONNECTION_COLORS = {"BLE": "tab:blue", "USB": "tab:orange"}
+SUBJECT = "Max"
+CONNECTIONS = ("USB", "BLE")  # layout: USB left half, BLE right half
 
-WALK_TYPES = ("Incline", "Fast", "Slow")
-
-EULER_SIGNALS = [
-    ("roll_deg", "roll", "deg"),
-    ("pitch_deg", "pitch", "deg"),
-    ("yaw_deg", "yaw", "deg"),
-]
-EULER_STYLES = {"roll_deg": "-", "pitch_deg": "--", "yaw_deg": ":"}
+WALK_TYPES = ("Slow", "Fast", "Incline")
+WALK_COLORS = {"Slow": "tab:blue", "Fast": "tab:green", "Incline": "tab:red"}
 
 CYCLE_XLABEL = "% of gait cycle (0 = heel strike)"
 
 
-def find_subject_trials(base, walk_type, source="PC", gain=1):
-    """The gain-1 trials for one walk type, keyed (subject, connection);
-    rep 1 == gain 1, PC source only, '# gain' matching in the EMG header.
-
-    Missing (subject, connection) combinations are simply absent."""
+def find_max_trials(base, walk_type, source="PC", gain=1):
+    """The gain-1 Max trials for one walk type, keyed by connection
+    (USB / BLE); rep 1 == gain 1, PC source only, '# gain' matching in
+    the EMG header. Missing connections are simply absent."""
     trials = find_trials(base, source, walk_type)
-    by_key = {}
+    by_conn = {}
     for trial_id, signals_path, emg_path in trials:
         m = trial_id.split("_")
-        # BLE_1_Karl_Fast_Walk_2026-09-08_PC
+        # BLE_1_Max_Fast_Walk_2026-09-08_PC
         connection, rep, subject = m[0], m[1], m[2]
-        if rep != str(gain):
+        if rep != str(gain) or subject != SUBJECT:
             continue
         emg_meta = read_header_comments(emg_path)
         if emg_meta.get("gain") not in (str(gain), None):
             continue
-        if subject not in SUBJECTS or connection not in CONNECTIONS:
+        if connection not in CONNECTIONS:
             continue
-        by_key[(subject, connection)] = (trial_id, signals_path, emg_path)
-    return by_key
+        by_conn[connection] = (trial_id, signals_path, emg_path)
+    return by_conn
 
 
 def compute_curves(meta, signals, emg, cycles, columns):
     """Gait-cycle-locked curves for the requested columns. Returns
     {column: (grid, curves)}; IMU columns are shifted by imu_t0_s into the
-    EMG sample-time base, exactly like plot_gait_group.py."""
+    EMG sample-time base, exactly like the other group plotters."""
     t_imu0 = float(meta.get("imu_t0_s", "0"))
     out = {}
     for col in columns:
@@ -117,87 +114,126 @@ def mean_and_ci(curves):
     return mean, ci, n
 
 
-def draw_euler_cell(ax, curves_by_conn, title):
-    """Euler means + 90 % CI for BLE and USB on one axes: colour =
-    connection, line style = angle; no individual cycle traces."""
+def _open(ax):
+    """Open panel style: keep only the left and bottom spines."""
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def draw_overlay(ax, curves_by_walk, label, unit, title):
+    """Slow/Fast/Incline means + 90 % CI on one open axes, one colour per
+    walk type; no individual cycle traces."""
     n_plotted = 0
-    for conn in CONNECTIONS:
-        data = curves_by_conn.get(conn)
+    for walk in WALK_TYPES:
+        data = curves_by_walk.get(walk)
         if not data:
             continue
-        color = CONNECTION_COLORS[conn]
-        ci_labeled = False
-        for col, label, _unit in EULER_SIGNALS:
-            grid, curves = data[col]
-            if curves is None:
-                continue
-            n_plotted += 1
-            mean, ci, n = mean_and_ci(curves)
-            if ci.any():
-                ax.fill_between(grid, mean - ci, mean + ci, color=color,
-                                alpha=0.15, lw=0,
-                                label=f"{conn} 90% CI"
-                                if not ci_labeled else None)
-                ci_labeled = True
-            ax.plot(grid, mean, color=color, lw=1.3, ls=EULER_STYLES[col],
-                    label=f"{conn} {label} (n={n})")
+        grid, curves = data
+        if curves is None:
+            continue
+        n_plotted += 1
+        mean, ci, n = mean_and_ci(curves)
+        color = WALK_COLORS[walk]
+        if ci.any():
+            ax.fill_between(grid, mean - ci, mean + ci, color=color,
+                            alpha=0.25, lw=0, label=f"{walk} 90% CI")
+        ax.plot(grid, mean, color=color, lw=1.4,
+                label=f"{walk} mean (n={n})")
     if n_plotted == 0:
         ax.text(0.5, 0.5, "No data", ha="center", va="center",
                 transform=ax.transAxes, fontsize=8)
     else:
-        ax.legend(loc="upper right", fontsize=7, ncol=2)
-    ax.set_ylabel("Euler angle (deg)")
-    ax.set_title(title, fontsize=10)
-    ax.set_xlabel(CYCLE_XLABEL)
+        ax.legend(loc="upper right", fontsize=7)
+    ax.set_ylabel(f"{label} ({unit})")
+    if title:
+        ax.set_title(title, fontsize=10)
+    _open(ax)
     ax.grid(True, alpha=0.3)
 
 
-def draw_signal_cell(axes, curves_by_conn, title):
-    """3 stacked subplots (EMG, accel PC1, rate PC1); the USB and BLE
-    means + 90 % CI are overlaid in each, colour = connection."""
-    for ax, (col, label, unit) in zip(axes, SIGNALS):
-        n_plotted = 0
-        for conn in CONNECTIONS:
-            data = curves_by_conn.get(conn)
-            if not data:
-                continue
-            grid, curves = data[col]
-            if curves is None:
-                continue
-            n_plotted += 1
-            mean, ci, n = mean_and_ci(curves)
-            color = CONNECTION_COLORS[conn]
-            if ci.any():
-                ax.fill_between(grid, mean - ci, mean + ci, color=color,
-                                alpha=0.25, lw=0, label=f"{conn} 90% CI")
-            ax.plot(grid, mean, color=color, lw=1.3,
-                    label=f"{conn} mean (n={n})")
-        if n_plotted == 0:
-            ax.text(0.5, 0.5, "No data", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8)
-        else:
-            ax.legend(loc="upper right", fontsize=7)
-        ax.set_ylabel(f"{label} ({unit})")
-        ax.grid(True, alpha=0.3)
-    axes[0].set_title(title, fontsize=10)
-    axes[-1].set_xlabel(CYCLE_XLABEL)
+def draw_boxplot(ax, p2p_by_walk, label, unit, title):
+    """Peak-to-peak box plots: one coloured box per walk type; each data
+    point is one gait cycle's (max - min) of that row's signal."""
+    series, positions, colors, names = [], [], [], []
+    for i, walk in enumerate(WALK_TYPES, start=1):
+        vals = p2p_by_walk.get(walk)
+        if vals is None or len(vals) == 0:
+            continue
+        series.append(np.asarray(vals, dtype=float))
+        positions.append(i)
+        colors.append(WALK_COLORS[walk])
+        names.append(walk)
+    if not series:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                transform=ax.transAxes, fontsize=8)
+    else:
+        bp = ax.boxplot(series, positions=positions, widths=0.55,
+                        patch_artist=True, showfliers=True,
+                        medianprops=dict(color="black", lw=1.2),
+                        flierprops=dict(marker="o", markersize=3,
+                                        markerfacecolor="0.4",
+                                        markeredgecolor="0.4"))
+        for box, color in zip(bp["boxes"], colors):
+            box.set_facecolor(color)
+            box.set_alpha(0.55)
+            box.set_edgecolor(color)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(names)
+        ax.set_xlim(0.5, len(WALK_TYPES) + 0.5)
+    ax.set_ylabel(f"peak-to-peak ({unit})")
+    if title:
+        ax.set_title(title, fontsize=10)
+    ax.grid(True, axis="y", alpha=0.3)
 
 
-def make_overlay_figure(subject_curves, gain, suptitle, out_path):
-    """One figure, 2 x 2 quadrants: euler cell on top, 3 signal
-    subplots below; Karl left, Max right."""
-    fig = plt.figure(figsize=(16, 13), constrained_layout=True)
+def make_overlay_figure(curves, p2p, suptitle, out_path):
+    """One figure, 3 rows (signals) x 4 columns
+    [USB overlay | USB box | BLE overlay | BLE box]. The cycle overlays
+    share ONE x axis (% of cycle, labelled once under the whole figure)
+    and stay open; the box plots keep their categorical walk-type x axis
+    with labels only on the bottom row."""
+    fig = plt.figure(figsize=(17, 11), constrained_layout=True)
     fig.suptitle(suptitle)
-    outer = fig.add_gridspec(2, 2, height_ratios=[1.0, 2.75])
-    for col, subject in enumerate(SUBJECTS):
-        curves_by_conn = subject_curves.get(subject, {})
-        ax = fig.add_subplot(outer[0, col])
-        draw_euler_cell(ax, curves_by_conn,
-                        f"{subject}: Euler angles (gain {gain})")
-        inner = outer[1, col].subgridspec(3, 1)
-        axes = [fig.add_subplot(inner[j]) for j in range(3)]
-        draw_signal_cell(axes, curves_by_conn,
-                         f"{subject}: BLE vs USB overlays (gain {gain})")
+    outer = fig.add_gridspec(3, 4, width_ratios=[1.4, 0.6, 1.4, 0.6])
+    anchor = None
+    cycle_axes = []
+    box_axes = []
+    bottom_axes = []
+    for row, (col, label, unit) in enumerate(SIGNALS):
+        for k, conn in enumerate(CONNECTIONS):
+            plot_col = 2 * k
+            # {walk: (grid, curves)} / {walk: p2p array} for this cell
+            by_walk = {w: cbc[col]
+                       for w, cbc in curves.get(conn, {}).items()
+                       if col in cbc}
+            p2p_by_walk = {w: arr[col]
+                           for w, arr in p2p.get(conn, {}).items()
+                           if col in arr}
+            # --- overlay cell (left of the pair) ---
+            ax = fig.add_subplot(outer[row, plot_col])
+            if anchor is None:
+                anchor = ax
+            ax.sharex(anchor)
+            cycle_axes.append(ax)
+            draw_overlay(ax, by_walk, label, unit,
+                         f"{conn}: {label}" if row == 0 else None)
+            # --- box-plot cell (directly right of its overlay) ---
+            bx = fig.add_subplot(outer[row, plot_col + 1])
+            box_axes.append(bx)
+            draw_boxplot(bx, p2p_by_walk, label, unit,
+                         f"{conn}: peak-to-peak" if row == 0 else None)
+            if row == len(SIGNALS) - 1:
+                bottom_axes.extend((ax, bx))
+
+    # One common cycle-% x axis: tick labels only on the bottom row
+    # (same for the box-plot walk-type labels).
+    anchor.set_xlim(0.0, 100.0)
+    for ax in cycle_axes:
+        ax.tick_params(labelbottom=ax in bottom_axes)
+    for bx in box_axes:
+        bx.tick_params(labelbottom=bx in bottom_axes)
+    fig.supxlabel(CYCLE_XLABEL)
+
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
@@ -208,7 +244,7 @@ def main(argv=None):
                     help="Root folder to search for the trial CSVs")
     ap.add_argument("--out-dir",
                     default=os.path.dirname(os.path.abspath(__file__)),
-                    help="Folder for the figures and the plot-data CSV")
+                    help="Folder for the figures and the plot-data CSVs")
     ap.add_argument("--source", choices=("PC", "SD"), default="PC",
                     help="Recording source (default: PC)")
     ap.add_argument("--gain", type=int, default=1,
@@ -224,19 +260,25 @@ def main(argv=None):
 
     walk_types = (args.walk_type,) if args.walk_type else WALK_TYPES
     plot_rows = []
+    p2p_rows = []
+    # curves[conn][walk_type][column] = (grid, curves_arr)
+    curves = {c: {} for c in CONNECTIONS}
+    # p2p[conn][walk_type][column] = per-cycle peak-to-peak array
+    p2p = {c: {} for c in CONNECTIONS}
+    columns = [c for c, _, _ in SIGNALS]
+
     for walk_type in walk_types:
-        group = find_subject_trials(args.base, walk_type, args.source,
-                                    args.gain)
+        group = find_max_trials(args.base, walk_type, args.source,
+                                args.gain)
         if not group:
             print(f"WARNING: no matching gain-{args.gain} {args.source} "
-                  f"{walk_type}_Walk trials found, skipping")
+                  f"{SUBJECT} {walk_type}_Walk trials found, skipping")
             continue
         print(f"\n{walk_type} walk: {len(group)} trials: "
               + ", ".join(t for t, _, _ in group.values()))
 
-        subject_curves = {}
-        for (subject, connection), (trial_id, signals_path,
-                                    emg_path) in group.items():
+        for connection, (trial_id, signals_path,
+                         emg_path) in group.items():
             loaded = load_trial(signals_path, emg_path)
             if loaded is None:
                 print(f"{trial_id}: no heel strikes, skipping")
@@ -244,20 +286,21 @@ def main(argv=None):
             meta, signals, emg = loaded
             strikes = parse_heel_strikes(meta)
             cycles = list(zip(strikes[:-1], strikes[1:]))
-            columns = ([c for c, _, _ in EULER_SIGNALS]
-                       + [c for c, _, _ in SIGNALS])
             curves_by_col = compute_curves(meta, signals, emg, cycles,
                                            columns)
-            subject_curves.setdefault(subject, {})[connection] = curves_by_col
+            curves[connection][walk_type] = curves_by_col
             print(f"{trial_id}: {len(cycles)} cycles")
+
             for col in columns:
-                grid, curves = curves_by_col[col]
-                if curves is None:
+                grid, curves_arr = curves_by_col[col]
+                if curves_arr is None:
                     continue
-                n = curves.shape[0]
-                mean, ci, _n = mean_and_ci(curves)
+                n = curves_arr.shape[0]
+                mean, ci, _n = mean_and_ci(curves_arr)
                 for x, m, lo, hi in zip(grid, mean, mean - ci, mean + ci):
                     plot_rows.append({
+                        "connection": connection,
+                        "walk_type": walk_type,
                         "trial_id": trial_id,
                         "signal": col,
                         "cycle_pct": x,
@@ -266,26 +309,39 @@ def main(argv=None):
                         "ci_high": hi,
                         "n_cycles": n,
                     })
+                p2p_vals = curves_arr.max(axis=1) - curves_arr.min(axis=1)
+                p2p[connection].setdefault(walk_type, {})[col] = p2p_vals
+                for k, v in enumerate(p2p_vals, start=1):
+                    p2p_rows.append({
+                        "connection": connection,
+                        "walk_type": walk_type,
+                        "trial_id": trial_id,
+                        "signal": col,
+                        "cycle": int(k),
+                        "p2p": float(v),
+                    })
 
-        for subject in SUBJECTS:
-            present = subject_curves.get(subject, {})
-            missing = [c for c in CONNECTIONS if c not in present]
-            if missing:
-                print(f"WARNING: {subject}: missing "
-                      f"{', '.join(missing)} data")
+    for conn in CONNECTIONS:
+        missing = [w for w in walk_types if w not in curves[conn]]
+        if missing:
+            print(f"WARNING: {conn}: missing {', '.join(missing)} data")
 
-        fig_path = os.path.join(args.out_dir,
-                                f"gait_{walk_type.lower()}_overlay.png")
-        suptitle = (f"Gait-cycle overlays ({walk_type} walk): gain-"
-                    f"{args.gain} {args.source} recordings - "
-                    "BLE vs USB per subject")
-        make_overlay_figure(subject_curves, args.gain, suptitle, fig_path)
-        print(f"written: {fig_path}")
+    fig_path = os.path.join(args.out_dir, "gait_group_overlay.png")
+    suptitle = (f"Gait-cycle overlays ({SUBJECT}): gain-{args.gain} "
+                f"{args.source} recordings - slow / fast / incline walk, "
+                "mean + 90% CI")
+    make_overlay_figure(curves, p2p, suptitle, fig_path)
+    print(f"\nwritten: {fig_path}")
 
     csv_path = os.path.join(args.out_dir, "gait_overlay_plot_data.csv")
     plot_data = pd.DataFrame(plot_rows)
     plot_data.to_csv(csv_path, index=False)
-    print(f"\nwritten: {csv_path}  ({len(plot_data)} rows)")
+    print(f"written: {csv_path}  ({len(plot_data)} rows)")
+
+    p2p_path = os.path.join(args.out_dir, "gait_overlay_p2p_data.csv")
+    p2p_data = pd.DataFrame(p2p_rows)
+    p2p_data.to_csv(p2p_path, index=False)
+    print(f"written: {p2p_path}  ({len(p2p_data)} rows)")
 
     if not args.no_plot:
         plt.show()

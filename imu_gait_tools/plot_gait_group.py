@@ -5,7 +5,7 @@ recordings, built from the same per-trial pipeline CSVs as
 plot_gait_trials.py (written by gait_analysis.py --save-trial-csv):
 
     <stem>_signals.csv  - 50 Hz IMU/PCA grid + '# key: value' header comments
-    <stem>_emg.csv      - 1000 Hz EMG envelope (µV) + header comments
+    <stem>_emg.csv      - 980 Hz EMG envelope (µV) + header comments
 
 One figure per walk type (gait_<type>_cycle_overlays.png), 2 x 2 quadrants,
 one trial per quadrant:

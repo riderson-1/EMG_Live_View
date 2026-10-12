@@ -5,7 +5,7 @@ recordings, built from the same per-trial pipeline CSVs as
 plot_sit_stand_trials.py:
 
     <stem>_signals.csv  - 50 Hz IMU/PCA grid + '# key: value' header comments
-    <stem>_emg.csv      - 1000 Hz EMG envelope (µV) + header comments
+    <stem>_emg.csv      - 980 Hz EMG envelope (µV) + header comments
 
 Figure layout (2 x 2 quadrants, one trial per quadrant):
 
