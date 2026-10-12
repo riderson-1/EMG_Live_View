@@ -48,3 +48,4 @@ if [ "${#failures[@]}" -gt 0 ]; then
 fi
 
 "$PY" "$COLLECT" --base "$BASE" --out "$OUT" --fs "$FS"
+"$PY" "$HERE/plot_gap_violin.py" --csv "$OUT" --out-dir "$HERE/outputs"
