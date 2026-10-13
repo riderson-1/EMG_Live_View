@@ -6,7 +6,8 @@ A function generator fed the same sine wave to all channels simultaneously.
 For every condition folder (ALL_<gain>G_Sine_<amp>mVpp_<freq>Hz) this script
 loads the PC.csv recording, converts ADC counts to volts, fits an ideal sine
 at the KNOWN nominal frequency (3-parameter linear least squares, IEEE 1057),
-computes amplitude error, SINAD and ENOB per channel, aggregates over the
+computes amplitude error, SINAD and ENOB (full-scale-normalized,
+MT-003 Eq. 2) per channel, aggregates over the
 channels, and saves tables plus interim data for plot.py.
 
 Sample rate: the ADS1299 is clocked with 2.000 MHz instead of the nominal
@@ -29,6 +30,17 @@ SINAD is computed from the fit residual of the driven signal itself.
 Usage:
     python3 analyze.py
 """
+
+# ============================================================================
+# METHODS NOTE
+# ============================================================================
+# The method follows the sine-fit approach of IEEE 1057 (3-parameter linear
+# least-squares fit at the known tone frequency) and the ADC characterization
+# conventions of IEEE 1241 (SINAD / ENOB definitions). SINAD therefore
+# includes the signal generator's own noise and distortion, i.e. it
+# characterizes the whole generator + input chain + ADC chain, not the ADC
+# alone. ENOB is normalized to full scale per Analog Devices MT-003 Eq. 2.
+# ============================================================================
 
 import os
 import re
@@ -247,7 +259,7 @@ def fit_sine_3p(y, f0, fs):
     return a, b, dc, M @ coef
 
 
-def sine_metrics(y, a, b, dc, fit, nominal_vpp):
+def sine_metrics(y, a, b, dc, fit, nominal_vpp, gain):
     """Amplitude, amplitude error, SINAD and ENOB for one fit."""
     vpp = 2.0 * float(np.hypot(a, b))
     amp_err_pct = (vpp - nominal_vpp) / nominal_vpp * 100.0
@@ -255,9 +267,16 @@ def sine_metrics(y, a, b, dc, fit, nominal_vpp):
     residual = y - fit
     rms_sine = float(np.sqrt(np.mean((fit - dc) ** 2)))   # sine part, DC removed
     rms_resid = float(np.sqrt(np.mean(residual ** 2)))
+    # SINAD (dB) = 20*log10(RMS_sine / RMS_residual), which equals
+    # 10*log10(P_signal / P_noise+distortion). RMS_sine is the RMS of the
+    # fitted sine with DC removed (A/sqrt(2)); the residual is data - fit
+    # (noise + distortion + any fit mismatch).
     if rms_sine > 0 and rms_resid > 0:
         sinad_db = 20.0 * np.log10(rms_sine / rms_resid)
-        enob = (sinad_db - 1.76) / 6.02
+
+        FS_pp = 2.0 * VREF / gain   # full-scale peak-to-peak at this gain, in volts
+        # Normalized to full scale per Analog Devices MT-003 Eq. 2, so ENOB is comparable across input amplitudes.
+        enob = (sinad_db - 1.76 + 20.0 * np.log10(FS_pp / vpp)) / 6.02
     else:
         sinad_db, enob = np.nan, np.nan
 
@@ -360,7 +379,8 @@ def main():
                 data_v[ch - 1] = y
 
                 a, b, dc, fit = fit_sine_3p(y, freq, fs_eff)
-                vpp, err, sinad, enob = sine_metrics(y, a, b, dc, fit, amp * 1e-3)
+                vpp, err, sinad, enob = sine_metrics(y, a, b, dc, fit,
+                                                     amp * 1e-3, gain)
 
                 vpp_ch[ch - 1] = vpp
                 err_ch[ch - 1] = err
@@ -388,7 +408,11 @@ def main():
                 "amp_err_min_pct": float(np.nanmin(err_ch)),
                 "amp_err_max_pct": float(np.nanmax(err_ch)),
                 "sinad_mean_db": float(np.nanmean(sinad_ch)),
+                "sinad_min_db": float(np.nanmin(sinad_ch)),
+                "sinad_max_db": float(np.nanmax(sinad_ch)),
                 "enob_mean_bits": float(np.nanmean(enob_ch)),
+                "enob_min_bits": float(np.nanmin(enob_ch)),
+                "enob_max_bits": float(np.nanmax(enob_ch)),
             })
             interim.append((gain, amp, freq, vpp_ch, err_ch, sinad_ch,
                             enob_ch, data_v, fit_v, fs_eff,

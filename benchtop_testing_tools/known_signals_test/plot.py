@@ -276,20 +276,24 @@ def export_results_table(d, csv_path, tex_path):
     columns = pd.Index(freqs, name="freq_hz")
 
     err = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
+    sinad = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
     enob = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
-    for g, a, f, e, b in zip(d["gains"], d["amps_mvpp"], d["freqs_hz"],
-                             np.nanmean(d["amp_err_pct"], axis=1),
-                             np.nanmean(d["enob_bits"], axis=1)):
+    for g, a, f, e, s, b in zip(d["gains"], d["amps_mvpp"], d["freqs_hz"],
+                                np.nanmean(d["amp_err_pct"], axis=1),
+                                np.nanmean(d["sinad_db"], axis=1),
+                                np.nanmean(d["enob_bits"], axis=1)):
         err.loc[(int(g), float(a)), int(f)] = e
+        sinad.loc[(int(g), float(a)), int(f)] = s
         enob.loc[(int(g), float(a)), int(f)] = b
 
-    # CSV: both metrics, one row per (gain, amplitude)
-    out = pd.concat({"amp_err_pct": err, "enob_bits": enob},
+    # CSV: all metrics, one row per (gain, amplitude)
+    out = pd.concat({"amp_err_pct": err, "sinad_db": sinad,
+                     "ENOB (FS-normalized)": enob},
                     names=["metric"]).rename_axis(
                         ["metric", "gain", "amp_mvpp"]).reset_index()
     out.to_csv(csv_path, index=False)
 
-    # LaTeX (booktabs): two matrices, missing conditions shown as "--"
+    # LaTeX (booktabs): three matrices, missing conditions shown as "--"
     def to_tex(block):
         disp = block.copy()
         disp.columns = [f"{f} Hz" for f in disp.columns]
@@ -302,7 +306,10 @@ def export_results_table(d, csv_path, tex_path):
     with open(tex_path, "w") as f:
         f.write("% Mean amplitude error across channels, in percent\n")
         f.write(to_tex(err))
-        f.write("\n\n% Mean ENOB across channels, in bits\n")
+        f.write("\n\n% Mean SINAD across channels, in dB (primary quality metric)\n")
+        f.write(to_tex(sinad))
+        f.write("\n\n% Mean ENOB (FS-normalized) across channels, in bits "
+                "(MT-003 Eq. 2)\n")
         f.write(to_tex(enob))
         f.write("\n")
 
