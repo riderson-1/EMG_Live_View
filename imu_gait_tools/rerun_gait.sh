@@ -22,7 +22,19 @@
 set -u
 TOOLS_DIR=$(cd "$(dirname "$0")" && pwd)
 SCRIPT=$TOOLS_DIR/gait_analysis.py
-VENV=$TOOLS_DIR/../.venv/bin/python
+# Python venv: prefer the one next to this checkout; when running from a
+# git worktree (this branch checked out beside the main repo), fall back to
+# the main workspace's venv - the first entry of `git worktree list`.
+# Override with VENV=/path/to/python if neither location applies.
+if [ -z "${VENV:-}" ]; then
+  if [ -x "$TOOLS_DIR/../.venv/bin/python" ]; then
+    VENV=$TOOLS_DIR/../.venv/bin/python
+  else
+    MAIN_WT=$(git -C "$TOOLS_DIR" worktree list --porcelain 2>/dev/null \
+        | awk '/^worktree /{print $2; exit}')
+    VENV=$MAIN_WT/.venv/bin/python
+  fi
+fi
 BASE=/home/karl/Documents/Master_Thesis/Testing/application_testing
 
 run() {

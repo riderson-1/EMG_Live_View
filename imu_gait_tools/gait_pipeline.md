@@ -158,10 +158,18 @@ recording on either panel, and writes `<trial>/heel_strikes.txt`, which
 `rerun_gait.sh` prefers over its hardcoded times.
 
 ```bash
-.venv/bin/python imu_gait_tools/pick_heel_strikes.py \
-    /home/karl/Documents/Master_Thesis/Testing/application_testing/\
-EMG_Testing_<date>/<trial>/<trial>_PC_signals.csv
+/home/karl/repos/Sokosti_tools/.venv/bin/python \
+    /home/karl/repos/Sokosti_tools-wt/gait-heel-strike-picker/imu_gait_tools/pick_heel_strikes.py \
+    /home/karl/Documents/Master_Thesis/Testing/application_testing/EMG_Testing_<date>/<trial>/<trial>_PC_signals.csv
 ```
+
+Run it from the branch's **git worktree**
+(`/home/karl/repos/Sokosti_tools-wt/gait-heel-strike-picker`), which sits
+beside the `main` checkout (`/home/karl/repos/Sokosti_tools`) so both
+branches can be open at the same time without fighting over one working
+tree. The worktree has no `.venv`, so always use the main workspace's
+interpreter (as above); `rerun_gait.sh` resolves it automatically
+(override with `VENV=/path/to/python`).
 
 Mouse / keys:
 
