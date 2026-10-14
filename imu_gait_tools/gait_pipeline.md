@@ -29,6 +29,7 @@ Raw CSV recordings          gait_analysis.py              rerun_gait.sh         
 | Stage | File | Location |
 |-------|------|----------|
 | 1. Analysis | `gait_analysis.py` | `/home/karl/repos/Sokosti_tools/imu_gait_tools/` |
+| 1b. Heel-strike picking | `pick_heel_strikes.py` | `/home/karl/repos/Sokosti_tools/imu_gait_tools/` |
 | 2. Batch runner | `rerun_gait.sh` | `/home/karl/repos/Sokosti_tools/imu_gait_tools/` |
 | 3. Plotting | `plot_gait_trials.py` | `/home/karl/repos/Sokosti_tools/imu_gait_tools/` |
 | 3b. Group plotting | `plot_gait_group.py` | `/home/karl/repos/Sokosti_tools/imu_gait_tools/` |
@@ -75,7 +76,9 @@ per trial** next to the capture CSV.
 - **`--env-cutoff 15`** (not the script default of 6) for all walk trials.
 - **Gain**: 1 for the USB_1 and BLE_1 sessions, 8 (the script default) for
   the BLE_8 sessions.
-- **Heel strikes**: 11 strikes per trial → 10 gait cycles.
+- **Heel strikes**: 11 strikes per trial → 10 gait cycles (the original
+  manual picks, taken from the logs; the Stage 1b picker replaces them
+  with the full set of strikes in the recording — n strikes → n−1 cycles).
 
 ### `<stem>_signals.csv` — 50 Hz IMU/PCA grid
 
@@ -122,15 +125,19 @@ command line, channel, gain, µV/code scale and the filter settings
   interpolation produced a staircase (visibly "choppy") overlay. Whether a
   trial was affected depended on the magnitude of its start time
   (t ≳ 1000 s loses the 1 ms digit; t < 1000 s keeps it).
-- **Heel strikes come from the existing logs**: all 18 trials were already
-  analyzed with manual heel-strike times; the batch runner reuses them
-  from each log's `# Command:` line, **scaled by 1000/980** so they select
-  the same samples on the 980 sps time base (same convention as
-  `rerun_iso_dor.sh` and `rerun_sit_stand.sh`). (The `heel_strikes.txt`
-  files in the trial folders are incomplete
-  — 3 of 18 missing — and partly stale, e.g. BLE_8_Karl_Slow_Walk_2026-09-14
-  starts at 1025 in the txt but 1026.1 in the log — so the logs are the
-  authoritative source.)
+- **Heel strikes: picked `heel_strikes.txt` wins, else the log-derived
+  hardcoded times**: all 18 trials were originally analyzed with 11 manual
+  heel-strike times; the batch runner reuses them from each log's
+  `# Command:` line, **scaled by 1000/980** so they select the same
+  samples on the 980 sps time base (same convention as
+  `rerun_iso_dor.sh` and `rerun_sit_stand.sh`). Since Stage 1b
+  (`pick_heel_strikes.py`) a trial's `heel_strikes.txt` overrides the
+  hardcoded times for that trial — but only when its first line contains
+  `pick_heel_strikes.py`. The **old hand-written** `heel_strikes.txt`
+  files (incomplete — 3 of 18 missing — and partly stale, e.g.
+  BLE_8_Karl_Slow_Walk_2026-09-14 starts at 1025 in the txt but 1026.1 in
+  the log) lack that header and are ignored, both by the picker's preload
+  and by `rerun_gait.sh`, so they can never silently change results.
 - **`imu_t0_s`**: the IMU time axis is zero-based at the first IMU row while
   the EMG time axis is absolute (sample/fs). The offset is stored so the
   plotter can align both onto one timeline.
@@ -141,12 +148,66 @@ command line, channel, gain, µV/code scale and the filter settings
 
 ---
 
+## Stage 1b: Heel-strike picking — `pick_heel_strikes.py`
+
+Interactive replacement for typing strike times by hand: it opens two
+x-aligned panels of a trial's **`*_PC_signals.csv`** — dynamic-accel
+PC1/PC2 on top, sagittal angular-rate PC1 below — (the PC recordings,
+fewer sample losses), lets you mark *every* heel strike in the full
+recording on either panel, and writes `<trial>/heel_strikes.txt`, which
+`rerun_gait.sh` prefers over its hardcoded times.
+
+```bash
+/home/karl/repos/Sokosti_tools/.venv/bin/python \
+    /home/karl/repos/Sokosti_tools-wt/gait-heel-strike-picker/imu_gait_tools/pick_heel_strikes.py \
+    /home/karl/Documents/Master_Thesis/Testing/application_testing/EMG_Testing_<date>/<trial>/<trial>_PC_signals.csv
+```
+
+Run it from the branch's **git worktree**
+(`/home/karl/repos/Sokosti_tools-wt/gait-heel-strike-picker`), which sits
+beside the `main` checkout (`/home/karl/repos/Sokosti_tools`) so both
+branches can be open at the same time without fighting over one working
+tree. The worktree has no `.venv`, so always use the main workspace's
+interpreter (as above); `rerun_gait.sh` resolves it automatically
+(override with `VENV=/path/to/python`).
+
+Mouse / keys:
+
+- **left click** add a strike (snapped to the nearest EMG sample, on
+  either panel) ·
+  **right click** remove the nearest mark (within 5 % of the view) ·
+  **u** undo · **c** clear · **s** save & close · **q** quit without saving
+- the toolbar magnifier zooms (drag a rectangle) and the arrow cross pans;
+  while either tool is toggled on, marking clicks are ignored — toggle the
+  tool off again to add/remove strikes (so a pan click can never drop a
+  strike, and toolbar drag actions never add marks).
+
+Key properties:
+
+- The x-axis is the absolute EMG-sample/980 base (`t_s + imu_t0_s`) —
+  exactly what `--heel-strikes` expects, so picked times need **no
+  1000/980 scaling** (unlike the hardcoded log times).
+- Times are absolute, so one picked list applies to **both** the PC and
+  SD runs of the trial (same convention the hardcoded times use).
+- Strikes outside the PC recording's time coverage can't be edited there;
+  they are carried over from the previous source and reported on save.
+- The file is re-loaded by the picker — and honored by `rerun_gait.sh` —
+  only when its first line contains `pick_heel_strikes.py`; the old
+  hand-written `heel_strikes.txt` files stay inert.
+
+Workflow: pick → `bash rerun_gait.sh` (regenerates logs, PNGs and the
+per-trial CSVs with the new strikes) → Stage 3 plotters.
+
+---
+
 ## Stage 2: Batch runner — `rerun_gait.sh`
 
 36 commands (18 trials × PC/SD), one per run. Each command reproduces the
 settings of the existing `*_imu_analysis.log` exactly: the per-trial EMG
-channel, `--env-cutoff 15`, the per-session gain (1 or 8), the manual heel
-strikes (scaled by 1000/980 for the 980 sps time base), `--emg-fs 980`,
+channel, `--env-cutoff 15`, the per-session gain (1 or 8), the heel
+strikes (picked `heel_strikes.txt` for that trial if present, otherwise
+the log-derived hardcoded times scaled by 1000/980 for the 980 sps time
+base), `--emg-fs 980`,
 default percent time axis, `--no-plot --save-results
 --save-trial-csv`.
 
@@ -337,9 +398,12 @@ numpy/scipy/pandas/matplotlib installed.
 - **BLE gap rates vary widely** between trials; the EMG envelope is computed
   gap-aware per contiguous valid segment, and the gap statistics are in each
   log's EMG sample-loss table.
-- **Manual heel strikes** are subjective; they are recorded in each log's
-  `# Command:` line and in each `_signals.csv` header (`heel_strikes_s`),
-  so the exact cycles can always be audited.
+- **Manual heel strikes** are subjective; the originals are recorded in
+  each log's `# Command:` line and in each `_signals.csv` header
+  (`heel_strikes_s`), so the exact cycles can always be audited. With
+  Stage 1b the authoritative source per trial is a picked
+  `heel_strikes.txt` (which itself records its source CSV in a header
+  comment) once `rerun_gait.sh` has been re-run with it.
 - **PCA sign is arbitrary**; PC1 is canonicalised by convention (angular-
   rate PC1: axis pitch component positive, "pitch-up = positive"; dynamic-
   accel PC1: largest-|component| axis entry positive), so PC1 polarity is
