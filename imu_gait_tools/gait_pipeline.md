@@ -165,10 +165,26 @@ bash rerun_gait.sh
 .venv/bin/python plot_gait_trials.py            # all trials
 .venv/bin/python plot_gait_trials.py --source PC   # PC recordings only
 .venv/bin/python plot_gait_trials.py --walk-type Incline
+.venv/bin/python plot_gait_trials.py --csv path/to/BLE_8_Max_Fast_Walk_2026-09-14_PC_signals.csv
+.venv/bin/python plot_gait_trials.py --csv ... --raw-emg --channel 3
 ```
 
 Walks `application_testing/` for `*_signals.csv` + `*_emg.csv` pairs inside
 any `*Walk*` trial folder and reads **only the CSVs** (no log parsing).
+
+**`--csv`** restricts the run to a single trial: pass the path of its
+`*_signals.csv` (the sibling `*_emg.csv` is derived; the raw capture CSV
+`<stem>.csv` or a bare filename searched under `--base` are also accepted).
+
+**`--raw-emg [--channel N]`** replaces the EMG-envelope subplot with the
+**raw, unfiltered** EMG of channel `chN` (default 1) — no bandpass, no
+notch, no rectification, no envelope — read straight from the capture CSV
+named by the `# input:` header comment (codes → µV → mV, DC offset kept,
+gap rows drawn as line breaks). The raw overlay uses a 2048-point cycle
+grid (instead of 201) so the waveform survives the resampling, and one
+extra figure per trial, `<trial_id>_raw_ch<N>.png`, shows the channel as a
+plain time series with the heel strikes marked (no cycle locking, no
+mean/CI).
 
 ### Method
 
