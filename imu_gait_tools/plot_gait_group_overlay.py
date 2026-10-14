@@ -263,6 +263,8 @@ def main(argv=None):
     p2p_rows = []
     # curves[conn][walk_type][column] = (grid, curves_arr)
     curves = {c: {} for c in CONNECTIONS}
+    # trial_ids[conn][walk_type] = trial id the curves came from
+    trial_ids = {c: {} for c in CONNECTIONS}
     # p2p[conn][walk_type][column] = per-cycle peak-to-peak array
     p2p = {c: {} for c in CONNECTIONS}
     columns = [c for c, _, _ in SIGNALS]
@@ -289,18 +291,59 @@ def main(argv=None):
             curves_by_col = compute_curves(meta, signals, emg, cycles,
                                            columns)
             curves[connection][walk_type] = curves_by_col
+            trial_ids[connection][walk_type] = trial_id
             print(f"{trial_id}: {len(cycles)} cycles")
 
+    for conn in CONNECTIONS:
+        missing = [w for w in walk_types if w not in curves[conn]]
+        if missing:
+            print(f"WARNING: {conn}: missing {', '.join(missing)} data")
+
+    # Equalize the cycle counts: every trace (overlay mean/CI and
+    # peak-to-peak box) uses the SAME number of gait cycles - the
+    # lowest count found across all walk types and connections - so
+    # every legend reports the same n.
+    counts = {}
+    for conn in CONNECTIONS:
+        for walk, cbc in curves[conn].items():
+            for grid, arr in cbc.values():
+                if arr is not None:
+                    counts[(conn, walk)] = arr.shape[0]
+                    break
+    n_common = min(counts.values()) if counts else 0
+    if counts:
+        print("\nCycle counts: "
+              + ", ".join(f"{conn} {walk}={n}"
+                          for (conn, walk), n in counts.items()))
+        if max(counts.values()) > n_common:
+            print(f"Equalizing every trace to n={n_common} gait cycles "
+                  "(the lowest count)")
+
+    for conn in CONNECTIONS:
+        for walk, cbc in curves[conn].items():
             for col in columns:
-                grid, curves_arr = curves_by_col[col]
+                grid, curves_arr = cbc.get(col, (None, None))
                 if curves_arr is None:
                     continue
+                curves_arr = curves_arr[:n_common]
+                cbc[col] = (grid, curves_arr)
+                p2p.setdefault(conn, {}).setdefault(walk, {})[col] = (
+                    curves_arr.max(axis=1) - curves_arr.min(axis=1))
+
+    # Mean/CI and per-cycle peak-to-peak CSVs from the equalized data.
+    for conn in CONNECTIONS:
+        for walk, cbc in curves[conn].items():
+            for col in columns:
+                grid, curves_arr = cbc.get(col, (None, None))
+                if curves_arr is None:
+                    continue
+                trial_id = trial_ids[conn].get(walk, "")
                 n = curves_arr.shape[0]
                 mean, ci, _n = mean_and_ci(curves_arr)
                 for x, m, lo, hi in zip(grid, mean, mean - ci, mean + ci):
                     plot_rows.append({
-                        "connection": connection,
-                        "walk_type": walk_type,
+                        "connection": conn,
+                        "walk_type": walk,
                         "trial_id": trial_id,
                         "signal": col,
                         "cycle_pct": x,
@@ -309,22 +352,15 @@ def main(argv=None):
                         "ci_high": hi,
                         "n_cycles": n,
                     })
-                p2p_vals = curves_arr.max(axis=1) - curves_arr.min(axis=1)
-                p2p[connection].setdefault(walk_type, {})[col] = p2p_vals
-                for k, v in enumerate(p2p_vals, start=1):
+                for k, v in enumerate(p2p[conn][walk][col], start=1):
                     p2p_rows.append({
-                        "connection": connection,
-                        "walk_type": walk_type,
+                        "connection": conn,
+                        "walk_type": walk,
                         "trial_id": trial_id,
                         "signal": col,
                         "cycle": int(k),
                         "p2p": float(v),
                     })
-
-    for conn in CONNECTIONS:
-        missing = [w for w in walk_types if w not in curves[conn]]
-        if missing:
-            print(f"WARNING: {conn}: missing {', '.join(missing)} data")
 
     fig_path = os.path.join(args.out_dir, "gait_group_overlay.png")
     suptitle = (f"Gait-cycle overlays ({SUBJECT}): gain-{args.gain} "
