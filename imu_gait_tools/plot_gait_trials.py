@@ -20,8 +20,9 @@ PC1 and the angular-rate PC1:
 With --raw-emg the envelope subplot is replaced by the raw, UNFILTERED
 EMG of --channel (read from the capture CSV named by the '# input:'
 header comment, codes -> mV, DC offset kept) and one extra figure per
-trial, <trial_id>_raw_ch<N>.png, shows that channel as a plain
-time series with the heel strikes marked.
+trial, <trial_id>_raw_ch<N>.png, shows three time-series subplots on a
+shared time axis: the raw channel on top, then the accel PC1 and the
+angular-rate PC1, with the heel strikes marked on every subplot.
 
 Usage:
     python plot_gait_trials.py                 # all Walk trials
@@ -134,10 +135,12 @@ def cycle_curves(t, y, cycles, time_axis="percent", n_grid=N_GRID):
     return grid, np.stack(curves)
 
 
-def make_trial_figure(trial_id, curves_by_signal, out_path, signals=None):
+def make_trial_figure(trial_id, curves_by_signal, out_path, signals=None,
+                      keep_open=False):
     """Overlay figure for one trial: individual traces (grey dashed) +
     mean (black) + 90 % CI, one subplot per signal. signals defaults to
-    the module-level SIGNALS list."""
+    the module-level SIGNALS list. keep_open=True leaves the figure open
+    for the interactive plt.show() instead of closing it after saving."""
     signals = SIGNALS if signals is None else signals
     fig, axes = plt.subplots(len(signals), 1, figsize=(11, 3 * len(signals)),
                              sharex=True, constrained_layout=True)
@@ -163,10 +166,12 @@ def make_trial_figure(trial_id, curves_by_signal, out_path, signals=None):
         ax.grid(True, alpha=0.3)
     axes[-1].set_xlabel("% of gait cycle (0 = heel strike)")
     fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+    if not keep_open:
+        plt.close(fig)
 
 
-def make_means_figure(means_by_signal, out_path, signals=None):
+def make_means_figure(means_by_signal, out_path, signals=None,
+                      keep_open=False):
     """Cross-trial figure: every trial's mean curve on one subplot per
     signal (one colour per trial). signals defaults to SIGNALS."""
     signals = SIGNALS if signals is None else signals
@@ -181,7 +186,8 @@ def make_means_figure(means_by_signal, out_path, signals=None):
     axes[0].legend(loc="upper right", fontsize=7)
     axes[-1].set_xlabel("% of gait cycle (0 = heel strike)")
     fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+    if not keep_open:
+        plt.close(fig)
 
 
 def find_trials(base, source=None, walk_type=None):
@@ -294,25 +300,39 @@ def load_raw_emg(meta, emg_path, channel, cycles):
     return {"t": sample / emg_fs, "y": y, "gap_rows": gap_rows}
 
 
-def make_raw_timeseries_figure(trial_id, raw, strikes, channel, out_path):
-    """Plain raw-EMG time series (no cycle locking, no filters): the chosen
-    channel over the full cycle time span, with the heel strikes marked."""
+def make_raw_timeseries_figure(trial_id, raw, strikes, channel, out_path,
+                               imu_series=None, keep_open=False):
+    """Plain time-series figure (no cycle locking, no filters): the raw
+    EMG channel on top, then the accel PC1 and angular-rate PC1 below,
+    all on a shared time axis, with the heel strikes marked on every
+    subplot. imu_series is a list of (col, label, unit, t, y) already
+    shifted into the EMG time base."""
     t, y, gap_rows = raw["t"], raw["y"], raw["gap_rows"]
     y = y.copy()
     y[gap_rows] = np.nan  # break the line at sample-counter gaps
-    fig, ax = plt.subplots(figsize=(11, 4.5), constrained_layout=True)
+    panels = [(f"EMG ch{channel} raw", "mV", t, y, "tab:blue", 0.5)]
+    for col, label, unit, t_imu, y_imu in (imu_series or []):
+        color = "tab:red" if "acc" in col.lower() else "tab:green"
+        panels.append((label, unit, t_imu, y_imu, color, 1.0))
+    fig, axes = plt.subplots(len(panels), 1,
+                             figsize=(11, 3 * len(panels)),
+                             sharex=True, constrained_layout=True)
+    axes = np.atleast_1d(axes)
     fig.suptitle(f"Raw EMG ch{channel} (unfiltered): {trial_id}")
-    ax.plot(t, y, lw=0.5, color="tab:blue")
-    for k, s in enumerate(strikes):
-        ax.axvline(s, color="tab:red", lw=0.8, ls="--", alpha=0.6,
-                   label="Heel strike" if k == 0 else None)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel(f"EMG ch{channel} raw (mV)")
-    ax.grid(True, alpha=0.3)
-    if strikes:
-        ax.legend(loc="upper right", fontsize=8)
+    for ax, (label, unit, tp, yp, color, lw) in zip(axes, panels):
+        ax.plot(tp, yp, lw=lw, color=color)
+        for k, s in enumerate(strikes):
+            ax.axvline(s, color="tab:red", lw=0.8, ls="--", alpha=0.6,
+                       label="Heel strike" if k == 0 else None)
+        ax.set_ylabel(f"{label} ({unit})")
+        ax.grid(True, alpha=0.3)
+        if strikes:
+            ax.legend(loc="upper right", fontsize=8)
+    axes[0].set_xlim((t.min(), t.max()))
+    axes[-1].set_xlabel("Time (s)")
     fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+    if not keep_open:
+        plt.close(fig)
 
 
 def main(argv=None):
@@ -340,11 +360,17 @@ def main(argv=None):
                     help="1-based raw EMG channel (ch1, ch2, ...) used "
                          "with --raw-emg (default: 1)")
     ap.add_argument("--no-plot", action="store_true",
-                    help="Do not open an interactive plot window")
+                    help="Do not open interactive plot windows (figures "
+                         "are only saved to --out-dir)")
     args = ap.parse_args(argv)
 
     if plt is None:
         raise SystemExit("matplotlib is required for the plotter")
+
+    # keep figures open for a blocking, pannable/zoomable plt.show() at the
+    # end (nothing to show otherwise); Agg/headless runs only save files
+    show = (not args.no_plot
+            and matplotlib.get_backend().lower() != "agg")
 
     if args.csv:
         signals_path, emg_path = resolve_signals_csv(args.csv)
@@ -421,17 +447,24 @@ def main(argv=None):
         make_trial_figure(trial_id, curves_by_signal,
                           os.path.join(args.out_dir,
                                        trial_id + "_cycle_overlays.png"),
-                          signals=signals)
+                          signals=signals, keep_open=show)
 
         if args.raw_emg:
             raw_png = os.path.join(args.out_dir,
                                    f"{trial_id}_raw_ch{args.channel}.png")
+            imu_series = [(col, label, unit,
+                           signals_df["t_s"].values + t_imu0,
+                           signals_df[col].values)
+                          for col, label, unit in SIGNALS[1:]]
             make_raw_timeseries_figure(trial_id, raw, strikes,
-                                       args.channel, raw_png)
+                                       args.channel, raw_png,
+                                       imu_series=imu_series,
+                                       keep_open=show)
             print(f"written: {raw_png}")
 
     means_path = os.path.join(args.out_dir, "gait_cycle_means.png")
-    make_means_figure(means_by_signal, means_path, signals=signals)
+    make_means_figure(means_by_signal, means_path, signals=signals,
+                      keep_open=show)
 
     plot_data = pd.DataFrame(plot_rows)
     csv_path = os.path.join(args.out_dir, "gait_plot_data.csv")
@@ -440,7 +473,7 @@ def main(argv=None):
     print(f"written: {means_path}")
     print(f"written: {csv_path}  ({len(plot_data)} rows)")
 
-    if not args.no_plot:
+    if show:
         plt.show()
 
 

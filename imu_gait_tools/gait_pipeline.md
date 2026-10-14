@@ -162,7 +162,8 @@ bash rerun_gait.sh
 ## Stage 3: Plotting — `plot_gait_trials.py`
 
 ```
-.venv/bin/python plot_gait_trials.py            # all trials
+.venv/bin/python plot_gait_trials.py            # all trials, interactive
+.venv/bin/python plot_gait_trials.py --no-plot  # full sweep: save only
 .venv/bin/python plot_gait_trials.py --source PC   # PC recordings only
 .venv/bin/python plot_gait_trials.py --walk-type Incline
 .venv/bin/python plot_gait_trials.py --csv path/to/BLE_8_Max_Fast_Walk_2026-09-14_PC_signals.csv
@@ -171,6 +172,12 @@ bash rerun_gait.sh
 
 Walks `application_testing/` for `*_signals.csv` + `*_emg.csv` pairs inside
 any `*Walk*` trial folder and reads **only the CSVs** (no log parsing).
+
+**Interactive popups**: every figure is written to `--out-dir` *and* left
+open, then `plt.show()` blocks at the end so each figure appears as a
+window with matplotlib's pan/zoom/scroll toolbar (use `--no-plot` for
+batch runs — a full sweep would otherwise open one window per figure;
+headless runs without a `DISPLAY` fall back to saving only).
 
 **`--csv`** restricts the run to a single trial: pass the path of its
 `*_signals.csv` (the sibling `*_emg.csv` is derived; the raw capture CSV
@@ -309,8 +316,9 @@ cd /home/karl/repos/Sokosti_tools
 # 1. per-trial analyses (regenerates logs + PNGs + per-trial CSVs)
 bash imu_gait_tools/rerun_gait.sh
 
-# 2. plots (figures + gait_plot_data.csv into imu_gait_tools/)
-.venv/bin/python imu_gait_tools/plot_gait_trials.py
+# 2. plots (figures + gait_plot_data.csv into imu_gait_tools/; --no-plot
+#    = save only, otherwise one interactive window per figure opens)
+.venv/bin/python imu_gait_tools/plot_gait_trials.py --no-plot
 
 # 2b. group figures (gain-1 PC trials, 2x2 quadrants per walk type)
 .venv/bin/python imu_gait_tools/plot_gait_group.py
