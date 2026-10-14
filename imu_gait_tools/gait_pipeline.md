@@ -150,10 +150,11 @@ command line, channel, gain, µV/code scale and the filter settings
 
 ## Stage 1b: Heel-strike picking — `pick_heel_strikes.py`
 
-Interactive replacement for typing strike times by hand: it opens the
-accel PC1/PC2 trace of a trial's **`*_PC_signals.csv`** (the PC
-recordings — fewer sample losses), lets you mark *every* heel strike in
-the full recording, and writes `<trial>/heel_strikes.txt`, which
+Interactive replacement for typing strike times by hand: it opens two
+x-aligned panels of a trial's **`*_PC_signals.csv`** — dynamic-accel
+PC1/PC2 on top, sagittal angular-rate PC1 below — (the PC recordings,
+fewer sample losses), lets you mark *every* heel strike in the full
+recording on either panel, and writes `<trial>/heel_strikes.txt`, which
 `rerun_gait.sh` prefers over its hardcoded times.
 
 ```bash
@@ -164,11 +165,14 @@ EMG_Testing_<date>/<trial>/<trial>_PC_signals.csv
 
 Mouse / keys:
 
-- **left click** add a strike (snapped to the nearest EMG sample) ·
+- **left click** add a strike (snapped to the nearest EMG sample, on
+  either panel) ·
   **right click** remove the nearest mark (within 5 % of the view) ·
   **u** undo · **c** clear · **s** save & close · **q** quit without saving
-- the toolbar magnifier zooms (drag a rectangle); clicks that *drag* are
-  toolbar actions and never add/remove marks — only clean clicks do.
+- the toolbar magnifier zooms (drag a rectangle) and the arrow cross pans;
+  while either tool is toggled on, marking clicks are ignored — toggle the
+  tool off again to add/remove strikes (so a pan click can never drop a
+  strike, and toolbar drag actions never add marks).
 
 Key properties:
 

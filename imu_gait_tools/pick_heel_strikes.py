@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Interactive heel-strike picker for the gait pipeline.
 
-Opens the accel PC1/PC2 trace of a trial's <stem>_PC_signals.csv, lets you
-mark heel strikes with the mouse, and writes the result to
+Opens two x-aligned panels of a trial's <stem>_PC_signals.csv - dynamic-
+accel PC1/PC2 on top, sagittal angular-rate PC1 below - lets you mark
+heel strikes with the mouse on either panel, and writes the result to
 <trial>/heel_strikes.txt - the file rerun_gait.sh prefers over its
 hardcoded (log-derived) strike times.
 
@@ -11,20 +12,22 @@ Usage:
 
 Mouse / keys:
     left click    add a heel strike (snapped to the nearest EMG sample on
-                  the absolute 980 sps time base)
+                  the absolute 980 sps time base); works on either panel
     right click   remove the nearest mark (within 5% of the visible span)
     u             undo the last added strike
     c             clear all visible strikes
     s / Enter     save heel_strikes.txt and close
     q             quit without saving
-    toolbar       magnifier = zoom (drag a rectangle), home = reset view
+    toolbar       magnifier = zoom (drag a rectangle), arrow cross = pan,
+                  home = reset view. While pan or zoom is toggled on it
+                  owns the mouse: marking clicks are ignored until you
+                  toggle the tool off again (keeps a pan click from
+                  dropping a strike).
 
 Notes:
     * Use a *_PC_signals.csv (the PC recordings have fewer sample losses);
       the saved times are absolute (EMG sample / 980), so they apply to
       BOTH the PC and SD runs of the trial - same convention as before.
-      Clicks that start a toolbar zoom/pan drag are ignored; only clean
-      clicks add or remove marks.
     * Strikes outside the PC recording's time coverage cannot be edited
       here; they are carried over from the previous source and reported
       when saving.
@@ -117,7 +120,7 @@ class Picker:
 
         meta = read_meta(self.path)
         df = pd.read_csv(self.path, comment="#")
-        for col in ("t_s", "acc_pc1_g", "acc_pc2_g"):
+        for col in ("t_s", "acc_pc1_g", "acc_pc2_g", "rate_pc1_dps"):
             if col not in df.columns:
                 raise SystemExit(f"{self.path}: missing column '{col}'")
 
@@ -127,6 +130,7 @@ class Picker:
         self.t = df["t_s"].to_numpy(float) + t0_imu
         self.pc1 = df["acc_pc1_g"].to_numpy(float)
         self.pc2 = df["acc_pc2_g"].to_numpy(float)
+        self.rate1 = df["rate_pc1_dps"].to_numpy(float)
         self.t0, self.t1 = float(self.t[0]), float(self.t[-1])
 
         existing, source = load_existing(self.trial_dir, meta)
@@ -151,21 +155,34 @@ class Picker:
     def _build_figure(self):
         import matplotlib.pyplot as plt
 
-        self.lines = {}          # strike time -> axvline artist
+        self.lines = {}          # strike time -> (axvline on accel, on rate)
         self.texts = []          # index labels (rebuilt on every change)
         self._press = None
 
-        self.fig, self.ax = plt.subplots(figsize=(20, 4.5),
-                                         constrained_layout=True)
+        # Explicit margins instead of constrained_layout: a resized window
+        # made constrained_layout warn "axes sizes collapsed to zero".
+        self.fig, (self.ax, self.ax2) = plt.subplots(2, 1, figsize=(20, 6.5),
+                                                     sharex=True)
+        self.fig.subplots_adjust(left=0.045, right=0.99, top=0.87,
+                                 bottom=0.11, hspace=0.10)
+
         self.ax.plot(self.t, self.pc1, lw=1.0, color="k", label="accel PC1")
         self.ax.plot(self.t, self.pc2, lw=0.8, color="tab:red", alpha=0.6,
                      label="accel PC2")
-        self.ax.set_xlabel("time (s, absolute EMG-sample/980 base - "
-                           "matches --heel-strikes)")
         self.ax.set_ylabel("dyn accel (g)")
-        self.ax.set_xlim(self.t0, self.t1)
+        self.ax.tick_params(labelbottom=False)
         self.ax.grid(True, alpha=0.3)
         self.ax.legend(loc="upper right", fontsize=8)
+
+        self.ax2.plot(self.t, self.rate1, lw=1.0, color="k",
+                      label="rate PC1 (sagittal)")
+        self.ax2.set_ylabel("ang. rate (deg/s)")
+        self.ax2.set_xlabel("time (s, absolute EMG-sample/980 base - "
+                            "matches --heel-strikes)")
+        self.ax2.grid(True, alpha=0.3)
+        self.ax2.legend(loc="upper right", fontsize=8)
+
+        self.ax.set_xlim(self.t0, self.t1)
 
     def _sync(self):
         """Sort marks, redraw index labels and update the title."""
@@ -183,9 +200,11 @@ class Picker:
         self.ax.set_title(
             f"{os.path.basename(self.path)} - {len(self.strikes)} heel "
             f"strike(s){extra}\n"
-            "left click = add   right click = remove nearest   u = undo   "
-            "c = clear   s = save   q = quit   toolbar magnifier = zoom",
-            fontsize=10)
+            "left click = add (either panel)   right click = remove "
+            "nearest   u = undo   c = clear   s = save   q = quit\n"
+            "toolbar: zoom/pan first, then toggle the tool off again - "
+            "marking clicks are ignored while it is active",
+            fontsize=9.5)
         self.fig.canvas.draw_idle()
 
     # -- editing -----------------------------------------------------------
@@ -199,7 +218,10 @@ class Picker:
         if any(abs(xs - s) < DUP_TOL_S for s in self.strikes):
             print(f"  duplicate ignored ({xs:.4f} s already marked)")
             return
-        self.lines[xs] = self.ax.axvline(xs, color="tab:blue", ls="--", lw=1.2)
+        self.lines[xs] = (self.ax.axvline(xs, color="tab:blue", ls="--",
+                                          lw=1.2),
+                          self.ax2.axvline(xs, color="tab:blue", ls="--",
+                                           lw=1.2))
         self.strikes.append(xs)
         print(f"  + strike {xs:.4f} s ({len(self.strikes)} total)")
         self._sync()
@@ -216,7 +238,8 @@ class Picker:
         self.remove(nearest)
 
     def remove(self, s):
-        self.lines.pop(s).remove()
+        for line in self.lines.pop(s):
+            line.remove()
         self.strikes.remove(s)
         print(f"  - strike {s:.4f} s ({len(self.strikes)} total)")
         self._sync()
@@ -228,8 +251,9 @@ class Picker:
         self.remove(max(self.strikes, key=self.strikes.index))  # last added
 
     def clear(self):
-        for line in self.lines.values():
-            line.remove()
+        for lines in self.lines.values():
+            for line in lines:
+                line.remove()
         self.lines.clear()
         self.strikes.clear()
         print("  cleared all editable strikes")
@@ -259,10 +283,22 @@ class Picker:
 
     # -- events ------------------------------------------------------------
 
+    def _nav_active(self):
+        """True while the toolbar's pan or zoom tool is toggled on.
+
+        While a nav tool is active it owns the mouse; marking clicks are
+        ignored so a click that just starts a pan cannot drop a strike.
+        """
+        mode = getattr(getattr(self.fig.canvas, "toolbar", None),
+                       "mode", None)
+        if mode is None:
+            return False
+        return str(mode) in ("pan/zoom", "zoom rect")
+
     def on_press(self, event):
         # Remember the press; the action happens on release so toolbar
         # zoom/pan drags (which always move) never add or remove marks.
-        if event.inaxes is self.ax:
+        if event.inaxes in (self.ax, self.ax2) and not self._nav_active():
             self._press = (event.x, event.y, event.button)
 
     def on_release(self, event):
@@ -270,7 +306,7 @@ class Picker:
         if press is None:
             return
         px, py, button = press
-        if event.button != button or event.inaxes is not self.ax:
+        if event.button != button or event.inaxes not in (self.ax, self.ax2):
             return
         if event.xdata is None:
             return
